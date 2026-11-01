@@ -1,4 +1,5 @@
 "use client";
+import { createClientId } from "@/lib/utils/client-id";
 import { AgentMoneyBudget } from "./agent-money-budget";
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
@@ -64,7 +65,7 @@ export function AgentWorkspace() {
       await agentFetch(`/api/agent/runs/${run.id}`, { method: "POST", body: JSON.stringify({ action: "answer", answer: input }) }); setInput(""); await load(selected!.id); return;
     }
     const session = selected || await create();
-    const attempt = pending.current?.content === input && JSON.stringify(pending.current.files) === JSON.stringify(attachments) ? pending.current : { key: crypto.randomUUID(), content: input, files: attachments };
+    const attempt = pending.current?.content === input && JSON.stringify(pending.current.files) === JSON.stringify(attachments) ? pending.current : { key: createClientId(), content: input, files: attachments };
     pending.current = attempt;
     await agentFetch(`/api/agent/sessions/${session.id}/messages`, { method: "POST", body: JSON.stringify({ content: attempt.content, fileIds: attempt.files, idempotencyKey: attempt.key }) });
     pending.current = null; setInput(""); setAttachments([]); setDraft(""); setEvents([]); await load(session.id); await refreshList();

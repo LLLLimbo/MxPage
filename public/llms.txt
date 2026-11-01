@@ -70,6 +70,7 @@
 - Desktop requires no separate Node installation; user data stays in OS user-data folders. No commercial signing/Apple notarization; macOS uses ad-hoc signing.
 - Development: Node.js 24, npm ci, Next.js 14, React 18, TypeScript, Prisma/SQLite, Electron. Desktop builds must not overwrite live .next output.
 - Source startup reuses an existing workspace service, guards each build directory, rejects occupied ports without fallback, and preserves Next caches. Default binding is 127.0.0.1:3000; explicit hostname/port overrides remain supported.
+- LAN access: `npm run dev -- --hostname 0.0.0.0` accepts connections through the server's LAN IP. Browser request IDs support HTTP origins for recognition, task startup, prompt approval, batches, translation and Agent work; retries retain their original idempotency identifiers. Credentials remain browser- and origin-local.
 - Keys remain in browser/request context, not project records. Inference data goes to the configured model provider; local hosting is not offline generation.
 - Old workflow versions remain read-only history/export, without migration into V4. Verify output claims, appearance, parameters and translations.
 

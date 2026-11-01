@@ -1,4 +1,5 @@
 "use client";
+import { createClientId } from "@/lib/utils/client-id";
 import { heroCountOptions, detailCountOptions, hasOutputImages, OUTPUT_COUNT_ERROR } from "@/lib/utils/image-counts";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -95,7 +96,7 @@ export function BatchDetailWorkspace({ translation = false }: { translation?: bo
       return;
     }
     pending.current = true; setBusy(true); setPrepared(true);
-    upload.current.id ||= crypto.randomUUID();
+    upload.current.id ||= createClientId();
     try {
       for (const [index, group] of groups.entries()) {
         setStage(`准备商品 ${index + 1}/${groups.length}：${group.name}`);

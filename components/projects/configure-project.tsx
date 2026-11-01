@@ -1,4 +1,5 @@
 "use client";
+import { createClientId } from "@/lib/utils/client-id";
 import { heroCountOptions, detailCountOptions, hasOutputImages, OUTPUT_COUNT_ERROR } from "@/lib/utils/image-counts";
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
@@ -99,7 +100,7 @@ export function ConfigureProject({ project }: { project: Project }) {
       const resolvedSize = imageSize === "custom" ? `${customWidth}x${customHeight}` : imageSize;
       const imageSettings = { size: resolvedSize, background: imageBackground, outputFormat: imageOutputFormat, outputCompression: imageCompression, moderation: imageModeration };
       await data(await fetch(`/api/projects/${project.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, description, platform, modelSnapshot: { creationBrief: brief, creationConfigured: true, commerceCategory: category, creativePreferences: { version: 2, userDirection: direction }, previewConfig: { ...saved, heroImageCount: heroCount, detailSectionCount: detailCount, contentLanguage: language, imageAspectRatio: "3:4", quality, imageSettings } } }) }));
-      key.current ||= crypto.randomUUID();
+      key.current ||= createClientId();
       await data(await fetch(`/api/projects/${project.id}/detail-runs`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ idempotencyKey: key.current, language, heroCount, detailCount, quality, imageSettings }) }));
       router.push(`/projects/${project.id}/editor`);
     } catch (e) { toast.error(e instanceof Error ? e.message : "启动失败"); }

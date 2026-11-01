@@ -190,6 +190,8 @@ Open `http://localhost:3000`. Source defaults: `prisma/dev.db` and `storage/`. P
 
 Repeated startup reuses the workspace service. Unrelated port conflicts fail without changing ports or clearing caches. The default binding is `127.0.0.1:3000`; explicit `--hostname` / `--port` overrides are supported. Clearing browser site data removes unfinished IndexedDB upload drafts.
 
+For LAN access, run `npm run dev -- --hostname 0.0.0.0` and open the server's LAN IP from another computer. Request identifiers for product recognition, task startup, prompt approval, batches, translation and Agent work support LAN HTTP. API keys remain specific to each browser and origin.
+
 `DATABASE_URL` and `STORAGE_ROOT` configure data paths. `LOCK_BASE_URL` optionally fixes a private gateway. `NEXT_PUBLIC_SITE_URL` supplies an optional public origin for brand metadata; leave unset locally. It does not publish a marketing website: all workspace routes, including `/` and `/agent`, remain `noindex` and outside the sitemap. Only the static `/llms.txt` is crawlable when a public origin is configured. Robots directives are not access control: add authentication, TLS and isolation before publicly exposing this personal workspace.
 
 ## Frequently asked questions

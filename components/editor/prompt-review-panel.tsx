@@ -1,4 +1,5 @@
 "use client";
+import { createClientId } from "@/lib/utils/client-id";
 
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -31,7 +32,7 @@ export function PromptReviewPanel({ review, busy, onSubmit }: {
     return () => window.removeEventListener("beforeunload", warn);
   }, [dirty]);
   async function submit(confirm: boolean) {
-    if (confirm) confirmation.current ??= crypto.randomUUID();
+    if (confirm) confirmation.current ??= createClientId();
     submitted.current = pages;
     const success = await onSubmit(confirm ? "confirm-prompts" : "save-prompts", {
       revision: base.revision,

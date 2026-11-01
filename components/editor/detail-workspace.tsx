@@ -1,4 +1,5 @@
 "use client";
+import { createClientId } from "@/lib/utils/client-id";
 
 import { Select } from "@/components/ui/select";
 import { imageDisplayProgress } from "@/lib/tasks/image-progress";
@@ -196,7 +197,7 @@ export function DetailWorkspace({ initialProject, pageMode = "preview" }: { init
       return;
     }
     await act(async () => {
-      startKey.current ??= crypto.randomUUID();
+      startKey.current ??= createClientId();
       await post(`${base}/detail-runs`, { idempotencyKey: startKey.current, mode, sectionId: selected || undefined, instruction,
         language: mode === "translate" ? language : config.contentLanguage || "zh-CN", quality: config.quality || "auto", heroCount: config.heroImageCount ?? 4, detailCount: config.detailSectionCount ?? 6 });
       startKey.current = undefined; setInstruction("");

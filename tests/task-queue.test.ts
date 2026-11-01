@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { webcrypto } from "node:crypto";
 import { buildTaskQueue, nextQueueExpanded, taskIsRunning, taskShouldShow, type QueueRunRow, type QueueTaskRow } from "../lib/tasks/queue";
 import { describeQueueRequest, dismissTaskRequest, hydrateTaskRequests, taskRequests, trackQueueRequest } from "../lib/tasks/client-requests";
 
@@ -146,4 +147,18 @@ test("failed and thrown requests are recorded once without automatic retries", a
   await assert.rejects(trackQueueRequest("/api/xiaohongshu/edit", "POST", () => { calls++; throw new Error("connection lost"); }), /connection lost/);
   assert.equal(taskRequests.getState().entries[0].status, "FAILED");
   assert.equal(calls, 2);
+});
+
+test("LAN HTTP can dispatch a brief once without crypto.randomUUID", async t => {
+  const original = Object.getOwnPropertyDescriptor(globalThis, "crypto")!;
+  Object.defineProperty(globalThis, "crypto", { configurable: true, value: { getRandomValues: webcrypto.getRandomValues.bind(webcrypto) } });
+  t.after(() => Object.defineProperty(globalThis, "crypto", original));
+  const response = Response.json({ success: true, data: { name: "Test cup" } });
+  let calls = 0;
+  assert.equal(await trackQueueRequest("/api/projects/lan-http/brief", "POST", async () => { calls++; return response; }), response);
+  assert.equal(calls, 1);
+  assert.equal(response.bodyUsed, false);
+  const entry = taskRequests.getState().entries[0];
+  assert.match(entry.id, /^request:[\da-f]{8}-[\da-f]{4}-4[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/);
+  assert.equal(entry.status, "SUCCESS");
 });

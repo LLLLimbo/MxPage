@@ -1,4 +1,5 @@
 import { createStore } from "zustand/vanilla";
+import { createClientId } from "@/lib/utils/client-id";
 import type { TaskQueueItem } from "./queue";
 import { projectTaskDuration } from "./timing";
 
@@ -33,7 +34,7 @@ export function dismissTaskRequest(id: string) {
 export function trackQueueRequest(path: string, method: string, perform: () => Promise<Response>): Promise<Response> {
   const descriptor = describeQueueRequest(path, method);
   const workflow = method.toUpperCase() === "POST" && /^\/api\/(projects|tasks|detail-batches|xiaohongshu)(\/|$)/.test(path);
-  const id = descriptor ? `request:${crypto.randomUUID()}` : null;
+  const id = descriptor ? `request:${createClientId()}` : null;
   if (id && descriptor) {
     hydrateTaskRequests();
     const timestamp = new Date().toISOString();

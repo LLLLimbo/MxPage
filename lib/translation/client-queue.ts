@@ -1,4 +1,5 @@
 import { createStore } from "zustand/vanilla";
+import { createClientId } from "@/lib/utils/client-id";
 import { fileToBase64Payload } from "@/lib/utils/base64-upload";
 import type { ContentLanguage } from "@/lib/utils/content-language";
 import { taskNeedsAttention } from "@/lib/tasks/queue";
@@ -150,7 +151,7 @@ export function createTranslationQueue(deps: {
   }
   function enqueue(input: TranslationSubmission) {
     hydrate();
-    const id = (deps.uuid ?? (() => crypto.randomUUID()))();
+    const id = (deps.uuid ?? createClientId)();
     const uploadTotal = input.groups.reduce((n, group) => n + group.files.length, 0);
     const title = input.groups.length === 1 ? input.groups[0].name : `${input.groups[0].name} 等 ${input.groups.length} 套`;
     jobs.set(id, { input, projects: [] });
