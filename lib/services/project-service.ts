@@ -8,6 +8,7 @@ import { assetPublicUrl, deleteAssetRecord } from "@/lib/storage/asset-manager";
 import { visibleProjectsWhere } from "./project-visibility";
 import { isTrashed, trashProject } from "./recycle-bin";
 import { thumbnailUrl } from "@/lib/utils/thumbnail";
+import { ozonProductSchema, ozonReferencesSchema, type OzonProduct, type OzonReference } from "@/lib/ozon/contract";
 
 function readPreviewConfig(snapshot: unknown) {
   const data = (snapshot as Record<string, unknown> | null) ?? {};
@@ -126,9 +127,12 @@ export async function createProject(input: {
   style: string;
   description?: string | null;
   translationUpload?: { batchId: string; groupIndex: number };
+  ozonProduct?: OzonProduct;
+  ozonReferences?: OzonReference[];
 }) {
-  if (input.translationUpload) {
-    const { translationUpload, ...data } = input;
+  const { ozonProduct, ozonReferences, ...projectInput } = input;
+  if (projectInput.translationUpload) {
+    const { translationUpload, ...data } = projectInput;
     const id = `translation-upload-${createHash("sha256").update(`${translationUpload.batchId}:${translationUpload.groupIndex}`).digest("hex").slice(0, 32)}`;
     const fingerprint = createHash("sha256").update(JSON.stringify(data)).digest("hex");
     const project = await prisma.project.upsert({ where: { id }, create: { ...data, id, modelSnapshot: { workType: "translation", translationBatchId: translationUpload.batchId, uploadFingerprint: fingerprint } }, update: {} });
@@ -136,7 +140,7 @@ export async function createProject(input: {
     return project;
   }
   return prisma.project.create({
-    data: input,
+    data: { ...projectInput, ...(input.platform === "ozon" ? { modelSnapshot: { ozonProduct: ozonProductSchema.parse(ozonProduct || {}), ozonReferences: ozonReferences || [], previewConfig: { heroImageCount: 5, detailSectionCount: 0, contentLanguage: "ru-RU", imageAspectRatio: "3:4" } } } : {}) },
   });
 }
 
@@ -188,7 +192,15 @@ export async function getProjectDetail(projectId: string) {
 
 export async function updateProject(projectId: string, input: Record<string, unknown>) {
   await assertNoDetailRun(projectId);
-  const { modelSnapshot, ...projectPatch } = input;
+  const { modelSnapshot, ozonProduct, ozonReferences, ...projectPatch } = input;
+  const snapshotPatch: Record<string, unknown> = { ...(modelSnapshot as Record<string, unknown> || {}), ...(ozonProduct !== undefined ? { ozonProduct: ozonProductSchema.parse(ozonProduct) } : {}), ...(ozonReferences !== undefined ? { ozonReferences: ozonReferencesSchema.parse(ozonReferences) } : {}) };
+  if (snapshotPatch.ozonProduct) snapshotPatch.ozonProduct = ozonProductSchema.parse(snapshotPatch.ozonProduct);
+  if (snapshotPatch.ozonReferences) {
+    const rows = ozonReferencesSchema.parse(snapshotPatch.ozonReferences);
+    const sources = await prisma.productAsset.findMany({ where: { projectId, type: { in: ["MAIN", "ANGLE", "DETAIL", "REFERENCE"] } }, select: { id: true, isMain: true, type: true } });
+    if (rows.some(row => !sources.some(asset => asset.id === row.assetId)) || rows.some(row => sources.some(asset => asset.id === row.assetId && (asset.isMain || asset.type === "MAIN")) && row.role !== "same_product")) throw new Error("参考图分类无效，第一张图必须作为商品身份依据。");
+    snapshotPatch.ozonReferences = rows;
+  }
   if (Object.keys(projectPatch).length > 0) {
     await prisma.project.update({
       where: { id: projectId },
@@ -196,9 +208,9 @@ export async function updateProject(projectId: string, input: Record<string, unk
     });
   }
 
-  if ("modelSnapshot" in input) {
-    const updated = await patchProjectModelSnapshot(projectId, modelSnapshot);
-    await pruneProjectToPreviewConfig(projectId, updated?.modelSnapshot);
+  if (Object.keys(snapshotPatch).length) {
+    const updated = await patchProjectModelSnapshot(projectId, snapshotPatch);
+    if ("previewConfig" in snapshotPatch) await pruneProjectToPreviewConfig(projectId, updated?.modelSnapshot);
   }
 
   return getProjectDetail(projectId);

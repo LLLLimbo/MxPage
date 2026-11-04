@@ -16,6 +16,12 @@ export function isStructuredSchemaRejection(error: unknown) {
 // Keep field-level business feedback, but never render SDK bodies, HTML or stacks.
 export function requestErrorMessage(error: unknown, fallback = "操作暂未完成，请稍后重试。已有结果不会被清除。") {
   const value = error as { code?: string; message?: string } | null;
+  if (value?.code === "CONTENT_MODERATION_REFUSAL") return "上游模型的内容审核拒绝了本次请求，未自动重试。请检查商品素材与商业展示要求。";
+  if (value?.code === "PROVIDER_AUTH_ERROR") return "模型服务鉴权失败，请检查 API Key 和模型权限。";
+  if (value?.code === "PROVIDER_RATE_LIMIT") return "模型服务限流或额度不足，请检查额度后继续。";
+  if (value?.code === "PROVIDER_TIMEOUT") return "模型请求超时，结果暂未确认；已有请求记录已保留，请勿直接重复提交。";
+  if (value?.code === "PROVIDER_NETWORK_ERROR") return "模型服务连接中断，结果暂未确认；已有请求记录已保留。";
+  if (value?.code === "PROVIDER_HTTP_ERROR") return "上游接口返回错误，已有请求记录和结果已保留，请检查 API 监控。";
   if (value?.code === "MODEL_REQUEST_TIMEOUT") return "模型请求超时，结果暂未确认。请核对调用记录；只有明确确认可能再次计费后才会重新请求。";
   if (value?.code === "MODEL_REQUEST_FAILED" || value?.code === "IMAGE_REQUEST_FAILED") return "模型请求失败或响应中断，结果暂未确认。请核对调用记录；只有明确确认可能再次计费后才会重新请求。";
   if (value?.code === "IMAGE_DOWNLOAD_FAILED") return "图片已生成，但下载失败。请使用“仅恢复已有图片”重新下载，不需要重新生图。";
@@ -49,7 +55,7 @@ export async function readApiResponse<T = any>(response: Response): Promise<T> {
   const fallback = response.status === 404 ? "该项目或任务已不存在，请返回我的作品。"
     : response.status === 502 || response.status === 503 || response.status === 504 ? "服务暂时无法响应，请先查看任务进度，避免重复提交。"
     : "服务返回的数据无法读取，请稍后刷新。已有结果不会被清除。";
-  throw new ApiRequestError(response.status, payload?.error?.code || "INVALID_RESPONSE", requestErrorMessage({ status: response.status, message: payload?.error?.message }, fallback));
+  throw new ApiRequestError(response.status, payload?.error?.code || "INVALID_RESPONSE", requestErrorMessage({ code: payload?.error?.code, status: response.status, message: payload?.error?.message }, fallback));
 }
 
 // Read-only polling may time out and reconnect. Mutations are never replayed here.

@@ -1,4 +1,8 @@
 import { selectModel } from "@/lib/ai/model-selection";
+import { ozonSectionReferences } from "@/lib/ozon/runtime";
+import { ozonImageParameters, imageFailureCode } from "@/lib/ozon/image-policy";
+import { ozonImageRules } from "@/lib/ozon/rules";
+import { requestErrorMessage } from "@/lib/utils/request-error";
 import { z } from "zod";
 import type { PageSection, ProductAsset } from "@prisma/client";
 
@@ -76,15 +80,20 @@ function isTaskCanceledError(error: unknown) {
   return error instanceof Error && /task canceled/i.test(error.message);
 }
 
-function getGenerationSettings(project: { modelSnapshot: unknown } | null) {
+function publicOzonFailure(error: unknown) {
+  const code = imageFailureCode(error);
+  return Object.assign(new Error(requestErrorMessage({ code, message: requestErrorMessage(error) })), { code });
+}
+
+function getGenerationSettings(project: { modelSnapshot: unknown; platform?: string } | null) {
   const snapshot = (project?.modelSnapshot as Record<string, unknown> | null) ?? {};
   const settings = (snapshot.generationSettings as Record<string, unknown> | null) ?? {};
   const previewConfig = (snapshot.previewConfig as Record<string, unknown> | null) ?? {};
 
   return {
-    allowSvgFallback: settings.allowSvgFallback === true,
+    allowSvgFallback: project?.platform !== "ozon" && settings.allowSvgFallback === true,
     imageAspectRatio: previewConfig.imageAspectRatio === "3:4" ? "3:4" : "9:16",
-    contentLanguage: normalizeContentLanguage(previewConfig.contentLanguage),
+    contentLanguage: normalizeContentLanguage(previewConfig.contentLanguage || (project?.platform === "ozon" ? "ru-RU" : "zh-CN")),
     quality: ["auto", "low", "medium", "high", "xhigh", "max"].includes(String(previewConfig.quality))
       ? String(previewConfig.quality) as "auto" | "low" | "medium" | "high" | "xhigh" | "max"
       : "auto",
@@ -114,8 +123,9 @@ function readGenerationRequirements(analysis: unknown) {
 function getSectionAspectRatio(
   section: Pick<PageSection, "type">,
   detailAspectRatio: "3:4" | "9:16",
+  ozon = false,
 ): SectionImageAspectRatio {
-  return section.type === "HERO" ? "1:1" : detailAspectRatio;
+  return ozon ? "3:4" : section.type === "HERO" ? "1:1" : detailAspectRatio;
 }
 
 function getOutputSize(aspectRatio: SectionImageAspectRatio) {
@@ -333,6 +343,7 @@ async function generateWithFallback(params: {
   candidateModels: string[];
   prompt: string;
   size: string;
+  quality?: "auto" | "low" | "medium" | "high" | "xhigh" | "max";
   aspectRatio: SectionImageAspectRatio;
   referenceImages: string[];
   projectId: string;
@@ -347,6 +358,7 @@ async function generateWithFallback(params: {
     try {
       const generated = await trackedImageRequest(params.taskId, () => params.adapter.generateImageOnce({
         model,
+        quality: params.quality,
         prompt: params.prompt,
         size: params.size,
         aspectRatio: params.aspectRatio,
@@ -658,19 +670,20 @@ async function generateSectionImageInternal(
     const generationSettings = getGenerationSettings(project);
     const visualStyleGuide = getProjectVisualStyleGuide(project);
     const generationRequirements = readGenerationRequirements(project.analysis?.normalizedResult);
-    const sectionAspectRatio = getSectionAspectRatio(section, generationSettings.imageAspectRatio);
-    const outputSize = getOutputSize(sectionAspectRatio);
+    const sectionAspectRatio = getSectionAspectRatio(section, generationSettings.imageAspectRatio, project.platform === "ozon");
     const modelCandidates = buildImageModelCandidates(provider, { ...options, role: section.type === "HERO" ? "hero" : "detail" });
     const selectedModel = modelCandidates[0] ?? null;
+    const ozon = project.platform === "ozon" ? await ozonSectionReferences(projectId, section, options?.referenceAssetIds) : undefined;
+    const outputSize = ozon ? ozonImageParameters(provider, selectedModel || "").size || "auto" : getOutputSize(sectionAspectRatio);
     const explicitReferenceAssets = await resolveReferenceAssets(options?.referenceAssetIds ?? []);
-    const effectiveReferenceAssets = mergeReferenceAssets(
+    const effectiveReferenceAssets = ozon ? ozon.referenceAssetIds.map(id => { const asset = project.assets.find(asset => asset.id === id); if (!asset) throw new Error("Ozon 原始参考图已移除。"); return asset; }) : mergeReferenceAssets(
       project.assets as AssetRecord[],
       explicitReferenceAssets as AssetRecord[],
     );
     const referenceImages = await Promise.all(effectiveReferenceAssets.map((asset) => assetToDataUrl(asset)));
     await assertTaskNotCanceled(task.id);
 
-    const basePrompt = options?.regenerate
+    const basePrompt = ozon ? section.visualPrompt : options?.regenerate
       ? buildRegenerationPrompt(
           section,
           effectiveReferenceAssets as ProductAsset[],
@@ -687,7 +700,7 @@ async function generateSectionImageInternal(
           generationRequirements,
           project.platform,
         );
-    const prompt = await buildVisualPromptWithAgent({
+    const prompt = ozon ? basePrompt : await buildVisualPromptWithAgent({
       provider,
       adapter,
       mode: "ecommerce_section",
@@ -719,9 +732,10 @@ async function generateSectionImageInternal(
       }
 
       await prepareImageRecovery(task.id, { model: selectedModel, prompt, copy: section.copy, baseImageAssetId: section.currentImageAssetId,
-        metadata: { mode: "image_api", sourceReferenceAssetIds: effectiveReferenceAssets.map(asset => asset.id) } });
+        metadata: { mode: "image_api", sourceReferenceAssetIds: effectiveReferenceAssets.map(asset => asset.id), ...(ozon ? { ozon: { ...ozon.metadata, referenceAssetIds: ozon.referenceAssetIds } } : {}) } });
       const generation = await generateWithFallback({
         adapter,
+        quality: generationSettings.quality,
         candidateModels: modelCandidates,
         prompt,
         size: outputSize,
@@ -745,6 +759,7 @@ async function generateSectionImageInternal(
           mode: "image_api",
           usedModel: generation.model,
           sourceReferenceAssetIds: effectiveReferenceAssets.map((asset) => asset.id),
+          ...(ozon ? { ozon: { ...ozon.metadata, referenceAssetIds: ozon.referenceAssetIds } } : {}),
           primaryReferenceAssetId: effectiveReferenceAssets[0]?.id ?? null,
         },
       });
@@ -794,6 +809,7 @@ async function generateSectionImageInternal(
           usedModel: fallback.model,
           layout: fallback.layout,
           sourceReferenceAssetIds: effectiveReferenceAssets.map((asset) => asset.id),
+          ...(ozon ? { ozon: { ...ozon.metadata, referenceAssetIds: ozon.referenceAssetIds } } : {}),
           primaryReferenceAssetId: effectiveReferenceAssets[0]?.id ?? null,
           imageApiError: error instanceof Error ? error.message : "Unknown image api error",
         },
@@ -832,6 +848,7 @@ async function generateSectionImageInternal(
       usedModel,
       generationMode,
       sourceReferenceAssetIds: effectiveReferenceAssets.map((asset) => asset.id),
+          ...(ozon ? { ozon: { ...ozon.metadata, referenceAssetIds: ozon.referenceAssetIds } } : {}),
     });
 
     return { imageAsset, version, usedModel, generationMode };
@@ -844,9 +861,10 @@ async function generateSectionImageInternal(
     });
 
     if (!isTaskCanceledError(error)) {
-      await failTask(task.id, error instanceof Error ? error.message : "Image generation failed");
+      const safe = project.platform === "ozon" ? publicOzonFailure(error) : undefined;
+      await failTask(task.id, safe?.message || (error instanceof Error ? error.message : "Image generation failed"), safe ? { failureCode: safe.code } : undefined);
     }
-    throw error;
+    throw project.platform === "ozon" ? publicOzonFailure(error) : error;
   } finally {
     releaseTaskAbortController(task.id);
   }
@@ -924,19 +942,20 @@ export async function editSectionImage(
   const generationSettings = getGenerationSettings(project);
   const visualStyleGuide = getProjectVisualStyleGuide(project);
   const generationRequirements = readGenerationRequirements(project.analysis?.normalizedResult);
-  const sectionAspectRatio = getSectionAspectRatio(section, generationSettings.imageAspectRatio);
-  const outputSize = getOutputSize(sectionAspectRatio);
+  const sectionAspectRatio = getSectionAspectRatio(section, generationSettings.imageAspectRatio, project.platform === "ozon");
   const modelCandidates = buildImageModelCandidates(provider, {
     preferredModelId: options?.preferredModelId,
     edit: true,
     regenerate: true,
   });
   const selectedModel = modelCandidates[0] ?? null;
+  const ozon = project.platform === "ozon" ? await ozonSectionReferences(projectId, section, options?.referenceAssetIds) : undefined;
+  const outputSize = ozon ? ozonImageParameters(provider, selectedModel || "").size || "auto" : getOutputSize(sectionAspectRatio);
   const editMode = options?.editMode ?? "repaint";
   const explicitReferenceAssets = await resolveReferenceAssets(options?.referenceAssetIds ?? []);
-  const productReferenceAssets = mergeReferenceAssets(project.assets as AssetRecord[], explicitReferenceAssets as AssetRecord[]);
+  const productReferenceAssets = ozon ? ozon.referenceAssetIds.map(id => { const asset = project.assets.find(asset => asset.id === id); if (!asset) throw new Error("Ozon 原始参考图已移除。"); return asset; }) : mergeReferenceAssets(project.assets as AssetRecord[], explicitReferenceAssets as AssetRecord[]);
   const baseImage = await assetToDataUrl(section.currentImageAsset as AssetRecord);
-  const referenceImages = editMode === "translate" ? [] : await Promise.all(
+  const referenceImages = editMode === "translate" && !ozon ? [] : await Promise.all(
     productReferenceAssets
       .filter((asset) => asset.id !== section.currentImageAssetId)
       .map((asset) => assetToDataUrl(asset)),
@@ -976,7 +995,10 @@ export async function editSectionImage(
   });
 
   try {
-    const basePrompt = buildImageEditPrompt(
+    const ozonEditInstruction = ozon && editMode !== "translate" && options?.instruction?.trim()
+      ? `\n本次用户编辑要求（仅作修改指令，不渲染为文字）：\n${options.instruction.trim()}\n明确要求修改的画面或文案优先于旧提示词的对应内容，其余商品事实及视觉风格保留。\n`
+      : "";
+    const basePrompt = ozon ? `${ozon.context.rules?.image || ozonImageRules}\n本次仅修改当前独立3:4图片。保持商品身份：${ozon.context.analysis!.identity}；售卖数量：${ozon.context.quantity?.text || "未知，不标注数量"}。${ozonEditInstruction}\n当前图片已确认提示词：\n${section.visualPrompt}` : buildImageEditPrompt(
       section,
       productReferenceAssets as ProductAsset[],
       editMode,
@@ -985,10 +1007,10 @@ export async function editSectionImage(
       generationRequirements,
       project.platform,
     );
-    const promptWithInstruction = options?.instruction?.trim()
+    const promptWithInstruction = !ozon && options?.instruction?.trim()
       ? `${basePrompt}\n\nUser requested edit (follow this request while preserving the product identity and all unsupported facts):\n${options.instruction.trim()}`
       : basePrompt;
-    const prompt = editMode === "translate" ? buildTranslationPrompt(effectiveContentLanguage, options?.instruction) : await buildVisualPromptWithAgent({
+    const prompt = editMode === "translate" ? `${buildTranslationPrompt(effectiveContentLanguage, options?.instruction)}${ozon ? `\n${basePrompt}` : ""}` : ozon ? promptWithInstruction : await buildVisualPromptWithAgent({
       provider,
       adapter,
       mode: "image_edit",
@@ -1018,10 +1040,10 @@ export async function editSectionImage(
       }
 
       await prepareImageRecovery(task.id, { model: selectedModel, prompt, copy: section.copy, baseImageAssetId: section.currentImageAssetId,
-        metadata: { mode: "image_api", editMode, targetLanguage: editMode === "translate" ? effectiveContentLanguage : undefined, baseImageAssetId: section.currentImageAssetId, sourceReferenceAssetIds: productReferenceAssets.map(asset => asset.id) } });
+        metadata: { mode: "image_api", editMode, targetLanguage: editMode === "translate" ? effectiveContentLanguage : undefined, baseImageAssetId: section.currentImageAssetId, sourceReferenceAssetIds: productReferenceAssets.map(asset => asset.id), ...(ozon ? { ozon: { ...ozon.metadata, referenceAssetIds: ozon.referenceAssetIds } } : {}) } });
       const generation = editMode === "translate" ? {
         model: selectedModel,
-        generated: await trackedImageRequest(task.id, () => adapter.generateImageOnce({ model: selectedModel, prompt, referenceImages: [baseImage], size: "auto", quality: generationSettings.quality, timeoutMs: 180000, monitor: { projectId, sectionId, operation: "translate_section_image" },
+        generated: await trackedImageRequest(task.id, () => adapter.generateImageOnce({ model: selectedModel, prompt, referenceImages: [baseImage, ...(ozon ? referenceImages : [])], ...(ozon ? ozonImageParameters(provider, selectedModel) : { size: "auto" }), quality: generationSettings.quality, timeoutMs: 180000, monitor: { projectId, sectionId, operation: "translate_section_image" },
           ...imageTaskLifecycle(task.id),
         })),
       } : await editWithFallback({
@@ -1052,6 +1074,7 @@ export async function editSectionImage(
           targetLanguage: editMode === "translate" ? effectiveContentLanguage : undefined,
           baseImageAssetId: section.currentImageAssetId,
           sourceReferenceAssetIds: productReferenceAssets.map((asset) => asset.id),
+          ...(ozon ? { ozon: { ...ozon.metadata, referenceAssetIds: ozon.referenceAssetIds } } : {}),
           primaryReferenceAssetId: productReferenceAssets[0]?.id ?? null,
         },
       });
@@ -1100,6 +1123,7 @@ export async function editSectionImage(
           baseImageAssetId: section.currentImageAssetId,
           layout: fallback.layout,
           sourceReferenceAssetIds: productReferenceAssets.map((asset) => asset.id),
+          ...(ozon ? { ozon: { ...ozon.metadata, referenceAssetIds: ozon.referenceAssetIds } } : {}),
           primaryReferenceAssetId: productReferenceAssets[0]?.id ?? null,
           imageApiError: error instanceof Error ? error.message : "Unknown image edit api error",
         },
@@ -1142,6 +1166,7 @@ export async function editSectionImage(
       generationMode,
       baseImageAssetId: section.currentImageAssetId,
       sourceReferenceAssetIds: productReferenceAssets.map((asset) => asset.id),
+          ...(ozon ? { ozon: { ...ozon.metadata, referenceAssetIds: ozon.referenceAssetIds } } : {}),
     });
 
     return { imageAsset, version, usedModel, generationMode, editMode, targetLanguage: editMode === "translate" ? effectiveContentLanguage : undefined };
@@ -1153,8 +1178,9 @@ export async function editSectionImage(
       },
     });
 
-    await failTask(task.id, error instanceof Error ? error.message : "Image edit failed");
-    throw error;
+    const safe = project.platform === "ozon" ? publicOzonFailure(error) : undefined;
+    await failTask(task.id, safe?.message || (error instanceof Error ? error.message : "Image edit failed"), safe ? { failureCode: safe.code } : undefined);
+    throw safe || error;
   }
 }
 

@@ -5,7 +5,7 @@ import { cn } from "@/lib/utils";
 import { QuickStartWorkspace } from "./quick-start-workspace";
 import { BatchDetailWorkspace } from "./batch-detail-workspace";
 
-export function HomeCreateWorkspace({ initialBatch = false }: { initialBatch?: boolean }) {
+export function HomeCreateWorkspace({ initialBatch = false, ozon = false }: { initialBatch?: boolean; ozon?: boolean }) {
   const [batch, setBatch] = useState(initialBatch);
 
   return (
@@ -30,8 +30,8 @@ export function HomeCreateWorkspace({ initialBatch = false }: { initialBatch?: b
         </button>
         <span className={cn("transition-colors", batch ? "font-medium text-foreground" : "text-muted-foreground")}>批量生成</span>
       </div>
-      <div hidden={batch}><QuickStartWorkspace /></div>
-      <div hidden={!batch}><BatchDetailWorkspace /></div>
+      <div hidden={batch}><QuickStartWorkspace ozon={ozon}/></div>
+      <div hidden={!batch}><BatchDetailWorkspace ozon={ozon}/></div>
     </>
   );
 }

@@ -57,7 +57,7 @@ export function RecentProjectList({ history }: { history: ProjectHistoryPage }) 
           <Layers3 className="mx-auto mb-4 h-8 w-8 text-muted-foreground" />
           <p className="font-medium">{category === "all" ? "还没有作品" : `还没有${historyCategoryLabels[category]}作品`}</p>
           <p className="mt-2 text-sm text-muted-foreground">完成创作后，作品会自动保存在这里。</p>
-          <Link href={category === "translation" ? "/translate" : category === "xiaohongshu" ? "/xiaohongshu" : "/"} className={buttonVariants({ variant: "outline", className: "mt-5" })}>开始创作</Link>
+          <Link href={category === "translation" ? "/translate" : category === "xiaohongshu" ? "/xiaohongshu" : category === "ozon" ? "/ozon" : "/"} className={buttonVariants({ variant: "outline", className: "mt-5" })}>开始创作</Link>
         </div>
       ) : <div className={`columns-1 gap-4 md:columns-2 xl:columns-4 ${refreshing ? "opacity-60" : ""}`}>
       {projects.map((project) => (

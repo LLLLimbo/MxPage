@@ -17,6 +17,7 @@ export async function stitchDetailImages(buffers: Buffer[]) {
 
 export async function exportLongImage(projectId: string) {
   const project = await prisma.project.findUniqueOrThrow({ where: { id: projectId }, include: { sections: { orderBy: { order: "asc" }, include: { currentImageAsset: true } } } });
+  if (project.platform === "ozon") throw new Error("Ozon 图片独立交付，请下载分图 ZIP 或单张图片。");
   const details = project.sections.filter(s => s.type !== "HERO");
   const preview = (project.modelSnapshot as { previewConfig?: { detailSectionCount?: number } } | null)?.previewConfig;
   if (!details.length || details.some(s => !s.currentImageAsset) || (preview?.detailSectionCount && details.length < preview.detailSectionCount)) throw new Error("详情图片尚未补齐，请完成生成后下载完整长图；已有图片可下载 ZIP。");

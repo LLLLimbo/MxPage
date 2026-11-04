@@ -14,6 +14,7 @@ const checkUploadDrafts = require('./upload-drafts.cjs');
 const checkSupplementalInput = require('./supplemental-input.cjs');
 const checkAsyncImage = require('./async-image.cjs');
 const checkOutputCounts = require('./output-counts.cjs');
+const checkOzon = require('./ozon.cjs');
 const checkPromptReview = require('./prompt-review.cjs');
 const checkLanHttp = require('./lan-http.cjs');
 const promptFlow = process.argv.includes('--prompt-review-flow') ? require('./prompt-review-flow.cjs') : null;
@@ -58,6 +59,7 @@ async function until(check, label) { for (let i = 0; i < 300; i++) { if (await c
     await until(async () => { try { return (await fetch(`${baseUrl}/translate`)).ok; } catch { return false; } }, 'isolated server');
     browser = await chromium.launch({ ...(process.env.BROWSER_EXECUTABLE ? { executablePath: process.env.BROWSER_EXECUTABLE } : fs.existsSync(chromium.executablePath()) ? {} : { channel: 'chrome' }), headless: true, args: ['--no-proxy-server', '--host-resolver-rules=MAP mxpage-lan.test 127.0.0.1'] });
     const lanBaseUrl = baseUrl.replace('127.0.0.1', 'mxpage-lan.test');
+    if (process.argv.includes('--ozon-only')) { await checkOzon(browser, baseUrl, db, { png, directory }); assert.deepEqual(forbidden, []); assert.equal(calls.length, 0); return; }
     if (process.argv.includes('--lan-http-only')) {
       await checkLanHttp(browser, lanBaseUrl, db, png);
       await checkPromptReview(browser, lanBaseUrl, db);

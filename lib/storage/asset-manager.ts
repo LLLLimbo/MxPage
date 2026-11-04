@@ -1,6 +1,8 @@
 import fs from "fs/promises";
 import path from "path";
 import { createHash } from "crypto";
+import sharp, { type Metadata } from "sharp";
+import { isOzonRatio } from "@/lib/ozon/contract";
 
 import type { AssetType, ProductAsset } from "@prisma/client";
 import { nanoid } from "nanoid";
@@ -90,6 +92,7 @@ export async function saveGeneratedImage(params: {
     mimeType?: string | null;
   };
   metadata?: Record<string, unknown>;
+  beforeSave?: () => Promise<void>;
 }) {
   await ensureStorageScaffold();
   const dir = projectDir(params.projectId, "generated", params.sectionId ?? "standalone");
@@ -101,11 +104,12 @@ export async function saveGeneratedImage(params: {
   const fileName = `${Date.now()}-${nanoid(6)}.${ext}`;
   const relativePath = path.join("generated", params.projectId, params.sectionId ?? "standalone", fileName);
   const absolutePath = path.join(rootDir(), relativePath);
+  const write = async (bytes: string | Buffer) => { await params.beforeSave?.(); await fs.writeFile(absolutePath, bytes); };
 
   if (params.source.svgText) {
-    await fs.writeFile(absolutePath, params.source.svgText, "utf8");
+    await write(params.source.svgText);
   } else if (params.source.b64Json) {
-    await fs.writeFile(absolutePath, Buffer.from(params.source.b64Json, "base64"));
+    await write(Buffer.from(params.source.b64Json, "base64"));
   } else if (params.source.url) {
     let bytes: Buffer;
     try {
@@ -115,11 +119,17 @@ export async function saveGeneratedImage(params: {
     } catch (cause) {
       throw Object.assign(new Error("图片已生成，但下载失败。请使用“仅恢复已有图片”重新下载，不需要重新生图。", { cause }), { code: "IMAGE_DOWNLOAD_FAILED" });
     }
-    await fs.writeFile(absolutePath, bytes);
+    await write(bytes);
   } else {
     throw new Error("Image generation produced no usable image output.");
   }
 
+  let metadata = params.metadata;
+  if (metadata?.ozon) {
+    const dimensions = await sharp(absolutePath).metadata().catch(() => ({} as Metadata));
+    metadata = { ...metadata, ozon: { ...metadata.ozon as object, delivery: { width: dimensions.width || 0, height: dimensions.height || 0, ratioValid: isOzonRatio(dimensions.width, dimensions.height) } } };
+  }
+  await params.beforeSave?.();
   return prisma.productAsset.create({
     data: {
       projectId: params.projectId,
@@ -131,7 +141,7 @@ export async function saveGeneratedImage(params: {
       sortOrder: 0,
       metadata: {
         prompt: params.prompt,
-        ...(params.metadata ?? {}),
+        ...(metadata ?? {}),
       },
     },
   });

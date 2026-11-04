@@ -25,15 +25,17 @@ export async function listProjectHistory(
     const translationIds = translations.map(project => project.id);
     // Negating a missing SQLite JSON path excludes ordinary projects too. Exclude IDs instead.
     const filters: Record<WorkCategory, Prisma.ProjectWhereInput> = {
-      detail: { AND: [visible, { platform: { not: "xiaohongshu" } }, { id: { notIn: translationIds } }] },
+      detail: { AND: [visible, { platform: { notIn: ["xiaohongshu", "ozon"] } }, { id: { notIn: translationIds } }] },
+      ozon: { AND: [visible, { platform: "ozon", id: { notIn: translationIds } }] },
       xiaohongshu: { AND: [visible, { platform: "xiaohongshu", id: { notIn: translationIds } }] },
       translation: { AND: [visible, { id: { in: translationIds } }] },
     };
-    const [detail, xiaohongshu] = await Promise.all([
+    const [detail, xiaohongshu, ozon] = await Promise.all([
       db.project.count({ where: filters.detail }),
       db.project.count({ where: filters.xiaohongshu }),
+      db.project.count({ where: filters.ozon }),
     ]);
-    const counts = { all: detail + xiaohongshu + translationIds.length, detail, xiaohongshu, translation: translationIds.length };
+    const counts = { all: detail + xiaohongshu + ozon + translationIds.length, detail, xiaohongshu, ozon, translation: translationIds.length };
     const total = counts[requested.category];
     const totalPages = Math.max(1, Math.ceil(total / HISTORY_PAGE_SIZE));
     const page = Math.min(requested.page, totalPages);
@@ -54,7 +56,7 @@ export async function listProjectHistory(
       category: requested.category, page, totalPages, total, pageSize: HISTORY_PAGE_SIZE, counts,
       projects: projects.map(({ assets, sections, _count, ...project }) => ({
         ...project,
-        category: (translated.has(project.id) ? "translation" : project.platform === "xiaohongshu" ? "xiaohongshu" : "detail") as WorkCategory,
+        category: (translated.has(project.id) ? "translation" : project.platform === "xiaohongshu" ? "xiaohongshu" : project.platform === "ozon" ? "ozon" : "detail") as WorkCategory,
         sectionCount: _count.sections,
         coverImageUrl: assetPublicUrl(sections[0]?.currentImageAsset ?? assets[0]),
         coverThumbnailUrl: thumbnailUrl(sections[0]?.currentImageAsset ?? assets[0]),

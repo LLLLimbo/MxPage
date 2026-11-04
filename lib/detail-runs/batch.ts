@@ -22,7 +22,7 @@ export const batchInputSchema = z.object({
   translationInstruction: z.string().max(4000).optional(),
   reuseTranslationSources: z.boolean().optional(),
 });
-type BatchInput = z.infer<typeof batchInputSchema> & { workflow: "detail-batch-v1"; providerSnapshot?: ProviderSnapshot };
+type BatchInput = z.infer<typeof batchInputSchema> & { workflow: "detail-batch-v1"; contentProfile?: "ozon"; providerSnapshot?: ProviderSnapshot };
 type Item = { projectId: string; sourceProjectId?: string; language?: ContentLanguage; runId?: string; translationTaskId?: string; status: string; message: string };
 const json = (v: unknown) => JSON.parse(JSON.stringify(v)) as Prisma.InputJsonValue;
 const state = globalThis as typeof globalThis & { detailBatchWorkers?: Set<string> };
@@ -59,11 +59,15 @@ export async function getBatch(id: string) {
   });
   const allDone = visibleItems.every(i => i.status === "COMPLETED");
   const waitingPrompts = !["PENDING", "RUNNING", "CANCELED"].includes(task.status) && visibleItems.some(i => i.status === "WAITING_PROMPTS") && visibleItems.every(i => ["COMPLETED", "WAITING_PROMPTS"].includes(i.status));
-  return { id, status: allDone ? "SUCCESS" : waitingPrompts ? "WAITING_PROMPTS" : task.status, error: allDone || waitingPrompts ? null : task.errorMessage, items: visibleItems };
+  return { id, ...((task.inputPayload as unknown as BatchInput).contentProfile ? { contentProfile: "ozon" } : {}), status: allDone ? "SUCCESS" : waitingPrompts ? "WAITING_PROMPTS" : task.status, error: allDone || waitingPrompts ? null : task.errorMessage, items: visibleItems };
 }
 export async function startBatch(raw: unknown, credentials: RequestProviderCredentials) {
-  const parsed = batchInputSchema.parse(raw);
-  const input: BatchInput = { ...parsed, workflow: "detail-batch-v1" };
+  const candidate = raw as { projectIds?: unknown; options?: Record<string, unknown> } | null;
+  const targets = Array.isArray(candidate?.projectIds) && candidate.projectIds.every(id => typeof id === "string") ? await prisma.project.findMany({ where: { id: { in: candidate.projectIds } }, select: { platform: true } }) : [];
+  const ozon = targets.some(project => project.platform === "ozon");
+  if (ozon && targets.some(project => project.platform !== "ozon")) throw new Error("Ozon 商品需要单独创建批次。");
+  const parsed = batchInputSchema.parse(ozon ? { ...candidate, options: { language: "ru-RU", heroCount: 5, detailCount: 0, ...candidate?.options } } : raw);
+  const input: BatchInput = { ...parsed, workflow: "detail-batch-v1", ...(ozon ? { contentProfile: "ozon" } : {}) };
   const existing = await prisma.generationTask.findUnique({ where: { id: input.id } });
   if (existing) {
     if (JSON.stringify(batchInputSchema.parse(existing.inputPayload)) !== JSON.stringify(parsed)) throw new Error("此批次标识已用于其他配置。");

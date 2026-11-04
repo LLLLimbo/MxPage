@@ -2,7 +2,9 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Bot, BookOpenText, FolderKanban, History, Languages } from "lucide-react";
+import { useCallback, useState } from "react";
+import { WorkspaceNavigation } from "./workspace-navigation";
+import { Bot, BookOpenText, FolderKanban, History, Languages, ShoppingBag } from "lucide-react";
 
 import { ApiStatusIndicator } from "@/components/layout/api-status-indicator";
 import { UserMenu } from "@/components/layout/user-menu";
@@ -16,16 +18,19 @@ const navItems = [
   { href: "/", label: "一键详情页", icon: FolderKanban },
   { href: "/translate", label: "详情页翻译", icon: Languages },
   { href: "/xiaohongshu", label: "小红书图文", icon: BookOpenText },
+  { href: "/ozon", label: "Ozon 一键详情页", icon: ShoppingBag },
   { href: "/history", label: "我的作品", icon: History },
 ];
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
+  const [workspaceNav, setWorkspaceNav] = useState<{ pathname: string; href: string } | null>(null);
+  const setNavigation = useCallback((href: string | null) => setWorkspaceNav(href ? { pathname, href } : null), [pathname]);
   const isSettings = pathname === "/settings" || pathname.startsWith("/settings/") || pathname === "/monitor/usage";
-  const activeNavHref = navItems.find(item => item.href !== "/" && (pathname === item.href || pathname.startsWith(`${item.href}/`)))?.href
+  const activeNavHref = (workspaceNav?.pathname === pathname ? workspaceNav.href : undefined) ?? navItems.find(item => item.href !== "/" && (pathname === item.href || pathname.startsWith(`${item.href}/`)))?.href
     ?? (pathname === "/tasks" || /^\/projects\/[^/]+\/(editor|export)(\/|$)/.test(pathname) ? "/history" : "/");
   return (
-    <div className="min-h-screen text-foreground">
+    <WorkspaceNavigation.Provider value={setNavigation}><div className="min-h-screen text-foreground">
       <div className="mx-auto min-h-screen max-w-[1600px] px-4 py-5 md:px-6">
         <aside
           className="scrollbar-hidden fixed top-5 z-40 hidden h-[calc(100vh-2.5rem)] w-72 overflow-y-auto rounded-[2rem] border border-border bg-card p-5 shadow-soft md:flex md:flex-col"
@@ -87,6 +92,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           {children}
         </main>
       </div>
-    </div>
+    </div></WorkspaceNavigation.Provider>
   );
 }

@@ -28,6 +28,11 @@ import { claimRunLease, RunHalted, RUN_LEASE_MS } from "./run-lease";
 import { isStructuredSchemaRejection, requestErrorMessage } from "@/lib/utils/request-error";
 import { networkErrorCode } from "@/lib/utils/network-error";
 import { incompleteSupplementalEstimates, missingFieldSchema, normalizeSupplementalQuestions, resolveSupplementalSubmission, supplementalInputInstructions, supplementalQuestionsFromFields, supplementalQuestionIssues, supplementalSuggestionsSchema, type StoredSupplementalQuestion } from "./supplemental-input";
+import { freezeOzonContext } from "@/lib/ozon/runtime";
+import { ozonAnalysisSchema, validateOzonAnalysis, ozonImageRole, ozonPixelReferences, normalizeOzonPlanReferences, assertOzonQuantityCopy, type OzonContext } from "@/lib/ozon/contract";
+import { ozonGroundingRules, ozonPlanningRules, ozonDirectionRules, ozonReviewRules, ozonImageRules } from "@/lib/ozon/rules";
+import { ozonImageParameters, imageFailureCode } from "@/lib/ozon/image-policy";
+import { InvalidPlanCounts, planCountIssue, reconcilePlanCounts } from "./plan-counts";
 
 const json = (value: unknown) => JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
 const active = ["PENDING", "RUNNING", "WAITING_INPUT", "WAITING_PROMPTS"];
@@ -56,12 +61,19 @@ const directionSchema = z.object({
   })).max(12) })).min(1).max(30),
 });
 const xhsPlanSchema = planSchema.extend({ post: socialPostSchema });
-type WorkflowPlan = z.infer<typeof planSchema> & { post?: z.infer<typeof socialPostSchema> };
+const ozonPlanSchema = planSchema.extend({ sections: z.array(planSchema.shape.sections.element.omit({ evidence: true }).extend({ factIds: z.array(z.string()).default([]), referenceAssetIds: z.array(z.string()).default([]), variantOverview: z.boolean().default(false) })).min(1).max(30) });
+type WorkflowPlan = Omit<z.infer<typeof planSchema>, "sections"> & { post?: z.infer<typeof socialPostSchema>; sections: Array<z.infer<typeof planSchema>["sections"][number] & { factIds?: string[]; referenceAssetIds?: string[]; variantOverview?: boolean }> };
+function withPlanEvidence(plan: WorkflowPlan | z.infer<typeof ozonPlanSchema>): WorkflowPlan {
+  return { ...plan, sections: plan.sections.map(section => ({ ...section, evidence: "evidence" in section ? section.evidence : [] })) };
+}
 const imageReviewSchema = z.object({ passed: z.boolean(), issues: z.array(z.object({ kind: z.enum(["identity", "copy", "layout", "typography", "continuity"]), message: z.string().min(1).max(500), severity: z.enum(["warning", "error"]) })).max(10) });
 const setReviewSchema = z.object({ passed: z.boolean(), issues: z.array(z.object({ sectionIndexes: z.array(z.number().int().nonnegative()).min(1), message: z.string().min(1).max(500) })).max(8) });
 
 type RequestProgress = { state: "running" | "completed" | "uncertain" | "rejected"; requestId: string; error?: string; failureCode?: string; resultSource?: { url: string; mimeType?: string | null }; upstreamTask?: UpstreamImageTask };
 export type V4Checkpoint = {
+  ozon?: OzonContext;
+  planDraft?: WorkflowPlan;
+  planCountRepair?: { originalSections: WorkflowPlan["sections"]; sourceIndexes: number[][]; heroCount: number; detailCount: number };
   promptReview?: PromptReview;
   taskTiming?: TaskTiming;
   requestTimings?: Record<string, RequestTiming>;
@@ -117,6 +129,12 @@ export async function getV4DetailRun(projectId: string, runId?: string) {
     run = await prisma.detailRun.findUniqueOrThrow({ where: { id: run.id } });
   }
   const safeCheckpoint = { ...checkpoint, ...(checkpoint.lastError ? { lastError: { ...checkpoint.lastError, message: requestErrorMessage({ message: checkpoint.lastError.message }) } } : {}) };
+  const savedInput = run.input as unknown as DetailRunInput & { contentProfile?: string };
+  const countIssue = checkpoint.workflowVersion === 4 && checkpoint.plan && checkpoint.lastError?.stage === "PLAN"
+    ? planCountIssue(checkpoint.plan.sections, savedInput.heroCount, savedInput.detailCount, savedInput.contentProfile === "ozon") : undefined;
+  if (countIssue) safeCheckpoint.lastError = { stage: "PLAN", code: "PLAN_COUNT_INVALID", message: countIssue, retryable: false };
+  const recoverableSources = checkpoint.workflowVersion === 4 && checkpoint.ozon?.analysis && checkpoint.plan && checkpoint.lastError?.stage === "PLAN" && checkpoint.lastError.code === "OZON_PLAN_INVALID";
+  if (recoverableSources && !countIssue) safeCheckpoint.lastError = { stage: "PLAN", code: "PLAN_REFERENCES_RECOVERABLE", message: "已保存的规划可以继续，无需重新规划。请在生成前确认全部提示词。", retryable: false };
   const resolvedReviewError = ["COMPLETED", "PARTIAL"].includes(run.status) && selectedImagesMatch && hasResolvedReviewError(checkpoint);
   if (resolvedReviewError) safeCheckpoint.lastError = undefined;
   if (run.status === "WAITING_INPUT" && checkpoint.workflowVersion === 4) {
@@ -125,11 +143,14 @@ export async function getV4DetailRun(projectId: string, runId?: string) {
     const requiredFields = [...new Set([...(checkpoint.plan?.missingFields || []).map(field => field.field), ...incompleteSupplementalEstimates(checkpoint.confirmedSupplementalAnswers).flatMap(answer => answer.fields)])];
     safeCheckpoint.supplementalQuestionIssue = supplementalQuestionIssues(normalizeSupplementalQuestions(checkpoint.questions), requiredFields) || undefined;
   }
-  return { id: run.id, projectId, status: run.status, stage: run.stage, input: run.input, checkpoint: json(safeCheckpoint), error: !resolvedReviewError && run.error ? requestErrorMessage({ message: run.error }) : null, createdAt: run.createdAt, updatedAt: run.updatedAt, draining: run.status === "CANCELED" && !!run.leaseToken && !!run.leaseUntil && run.leaseUntil.getTime() > Date.now() };
+  return { id: run.id, projectId, status: run.status, stage: run.stage, input: run.input, checkpoint: json(safeCheckpoint), error: countIssue || (recoverableSources ? safeCheckpoint.lastError!.message : !resolvedReviewError && run.error ? requestErrorMessage({ message: run.error }) : null), createdAt: run.createdAt, updatedAt: run.updatedAt, draining: run.status === "CANCELED" && !!run.leaseToken && !!run.leaseUntil && run.leaseUntil.getTime() > Date.now() };
 }
 
 export async function createV4DetailRun(projectId: string, raw: unknown, credentials: RequestProviderCredentials) {
-  const input = detailRunInputSchema.parse(raw) as DetailRunInput;
+  const target = await prisma.project.findUniqueOrThrow({ where: { id: projectId }, select: { platform: true } });
+  const submitted = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
+  const input = detailRunInputSchema.parse(target.platform === "ozon" ? { language: "ru-RU", heroCount: 5, detailCount: 0, ...submitted } : raw) as DetailRunInput;
+  if (target.platform === "ozon" && input.mode === "xhs") throw new Error("Ozon 商品请使用商品图片流程，生成前必须确认提示词。");
   if (input.mode === "translate") throw new Error("图片翻译已改为独立批量功能，请使用详情页翻译入口。");
   const existing = await prisma.detailRun.findUnique({ where: { projectId_idempotencyKey: { projectId, idempotencyKey: input.idempotencyKey } } });
   if (existing) {
@@ -151,8 +172,14 @@ export async function createV4DetailRun(projectId: string, raw: unknown, credent
   const heroModelId = input.heroCount ? selectModel(provider.models, "hero") : undefined;
   const imageModelId = input.detailCount ? selectModel(provider.models, "detail") : heroModelId!;
   const providerSnapshot = snapshotProvider(provider);
+  const ozon = project.platform === "ozon" ? await freezeOzonContext(project) : undefined;
+  if (ozon) {
+    input.instruction ||= (project.modelSnapshot as { creativePreferences?: { userDirection?: string } } | null)?.creativePreferences?.userDirection || "";
+    if (heroModelId) ozonImageParameters(providerSnapshot, heroModelId, input.imageSettings.size);
+    if (input.detailCount) ozonImageParameters(providerSnapshot, imageModelId, input.imageSettings.size);
+  }
   const xhsPromptPack = input.mode === "xhs" ? createXhsPromptPack(project.description || "") : undefined;
-  const checkpoint: V4Checkpoint = { workflowVersion: 4, stage: "PREPARE", images: [], imageReviews: {}, answers: [], attempts: {}, timings: {}, ...(input.mode !== "xhs" ? { promptReview: { revision: 0, pages: [] } } : {}) };
+  const checkpoint: V4Checkpoint = { workflowVersion: 4, stage: "PREPARE", images: [], imageReviews: {}, answers: [], attempts: {}, timings: {}, ...(ozon ? { ozon } : {}), ...(input.mode !== "xhs" ? { promptReview: { revision: 0, pages: [] } } : {}) };
   let run;
   try {
     run = await prisma.$transaction(async tx => {
@@ -162,7 +189,7 @@ export async function createV4DetailRun(projectId: string, raw: unknown, credent
       const same = await tx.detailRun.findUnique({ where: { projectId_idempotencyKey: { projectId, idempotencyKey: input.idempotencyKey } } });
       if (same) return same;
       if (await tx.detailRun.findFirst({ where: { projectId, OR: [{ status: { in: active } }, { leaseToken: { not: null }, leaseUntil: { gt: new Date() } }] } })) throw new Error("当前项目仍有任务或已发出的请求正在收尾，请稍后继续。");
-      return tx.detailRun.create({ data: { projectId, idempotencyKey: input.idempotencyKey, input: json({ ...input, workflowVersion: 4, planningModelId, analysisModelId, heroModelId, imageModelId, providerSnapshot, xhsPromptPack }), checkpoint: json(checkpoint), leaseUntil: new Date(Date.now() + 60000) } });
+      return tx.detailRun.create({ data: { projectId, idempotencyKey: input.idempotencyKey, input: json({ ...input, workflowVersion: 4, planningModelId, analysisModelId, heroModelId, imageModelId, providerSnapshot, xhsPromptPack, ...(ozon ? { contentProfile: "ozon", ozon } : {}) }), checkpoint: json(checkpoint), leaseUntil: new Date(Date.now() + 60000) } });
     });
   } catch (error) {
     // Two browser retries can pass the read above at the same time. Treat the
@@ -211,6 +238,7 @@ export async function controlV4DetailRun(projectId: string, runId: string, actio
     if (confirm && !body.confirmationId) throw new PromptReviewConflict("缺少确认编号，请刷新后重新确认。");
     // Validate the task's original provider before accepting approval; saving drafts needs no credentials.
     if (confirm) {
+      if (cp.ozon) for (const page of body.pages) assertOzonQuantityCopy(page.prompt.split("Exact copy:").at(-1) || "", cp.ozon.quantity);
       const snapshot = (run.input as { providerSnapshot?: ProviderSnapshot }).providerSnapshot;
       await getProviderAdapter(snapshot?.id, snapshot, { legacyTextProtocol: !snapshot });
     }
@@ -257,8 +285,9 @@ export async function controlV4DetailRun(projectId: string, runId: string, actio
   }
   for (const request of Object.values(cp.requests)) if (request.state === "running") request.state = "uncertain";
   for (const image of cp.images) if (image.state === "generating") image.state = "uncertain";
-  const { retryUncertain, retryArtDirection, recoverImagesOnly } = z.object({ retryUncertain: z.boolean().default(false), retryArtDirection: z.boolean().default(false), recoverImagesOnly: z.boolean().default(false) }).parse(raw ?? {});
-  if (recoverImagesOnly && (action !== "resume" || retryUncertain || retryArtDirection)) throw new Error("仅恢复已有图片不能同时授权模型重试。");
+  const { retryUncertain, retryArtDirection, retryPlan, recoverImagesOnly } = z.object({ retryUncertain: z.boolean().default(false), retryArtDirection: z.boolean().default(false), retryPlan: z.boolean().default(false), recoverImagesOnly: z.boolean().default(false) }).parse(raw ?? {});
+  if (recoverImagesOnly && (action !== "resume" || retryUncertain || retryArtDirection || retryPlan)) throw new Error("仅恢复已有图片不能同时授权模型重试。");
+  if (retryPlan && (action !== "resume" || retryArtDirection || retryUncertain)) throw new Error("重新规划需要单独确认，不能同时重试分镜或其他请求。");
   cp.recoverImagesOnly = recoverImagesOnly;
   if (recoverImagesOnly && (!cp.plan || !cp.artDirection)) throw new Error("缺少已保存的规划或分镜，不能仅恢复图片。");
   // One click grants a single new attempt only for requests already uncertain at that click.
@@ -266,6 +295,18 @@ export async function controlV4DetailRun(projectId: string, runId: string, actio
     ...Object.entries(cp.requests).filter(([key, request]) => request.state === "uncertain" && !key.startsWith("GENERATE:")).map(([key]) => key),
     ...cp.images.filter(image => !image.assetId && image.state === "uncertain" && image.correctionCount < 1).map(image => `GENERATE:${image.sectionId}`),
   ] : [];
+  if (retryPlan) {
+    const frozen = run.input as unknown as DetailRunInput;
+    if (!cp.plan || !planCountIssue(cp.plan.sections, frozen.heroCount, frozen.detailCount)) throw new Error("当前没有需要重新规划的图片张数问题，请复用已保存的规划继续。");
+    if (cp.artDirection || cp.promptReview?.pages.length || cp.requests.ART_DIRECTION || cp.images.some(image => image.assetId || image.state !== "pending") || Object.keys(cp.requests).some(key => key.startsWith("GENERATE:"))) throw new Error("已有分镜、提示词或图片请求，不能替换规划。");
+    const providerSnapshot = (run.input as { providerSnapshot?: ProviderSnapshot }).providerSnapshot;
+    await getProviderAdapter(providerSnapshot?.id, providerSnapshot, { legacyTextProtocol: !providerSnapshot });
+    cp.planDraft = cp.plan;
+    cp.plan = undefined;
+    cp.retryAuthorized = ["PLAN"];
+    cp.planCountRepair = undefined;
+    if (cp.promptReview) cp.promptReview = { revision: cp.promptReview.revision + 1, pages: [] };
+  }
   if (action === "resume" && retryArtDirection) {
     const expected = (run.input as unknown as DetailRunInput).heroCount + (run.input as unknown as DetailRunInput).detailCount;
     const invalid = cp.artDirection && storyboardIssue(cp.artDirection.sections, expected);
@@ -276,6 +317,7 @@ export async function controlV4DetailRun(projectId: string, runId: string, actio
     cp.promptReview = { revision: (cp.promptReview?.revision ?? 0) + 1, pages: [] };
   }
   if (action === "suggestions") {
+    if (cp.ozon) throw new Error("Ozon 模式请填写真实商品资料，不生成模拟规格候选。");
     if (run.status !== "WAITING_INPUT") throw new Error("当前任务没有待补充的问题。");
     const issue = supplementalQuestionIssues(normalizeSupplementalQuestions(cp.questions), (cp.plan?.missingFields || []).map(field => field.field));
     if (!issue) return getV4DetailRun(projectId, runId);
@@ -288,6 +330,7 @@ export async function controlV4DetailRun(projectId: string, runId: string, actio
     if (cp.images.some(image => image.assetId) || Object.keys(cp.requests).some(key => key.startsWith("GENERATE:"))) throw new Error("当前任务已有图片请求，不能重新提交商品规划，请保留现有结果。");
     const body = z.object({ answer: z.string().max(6000).optional(), skip: z.boolean().optional(), responses: z.unknown().optional() }).parse(raw);
     if (body.responses !== undefined) {
+      if (cp.ozon) throw new Error("Ozon 模式只接受真实商品资料，请填写补充信息。");
       const questions = normalizeSupplementalQuestions(cp.questions);
       if (supplementalQuestionIssues(questions, (cp.plan?.missingFields || []).map(field => field.field))) throw new Error("请先为商品生成完整的具体候选答案。");
       cp.confirmedSupplementalAnswers = resolveSupplementalSubmission(questions, raw);
@@ -314,7 +357,7 @@ async function executeV4(runId: string) {
   const lease = await claimRunLease(runId);
   if (!lease) return;
   const run = await prisma.detailRun.findUniqueOrThrow({ where: { id: runId } }).catch(async error => { await lease.release(); throw error; });
-  const input = run.input as unknown as DetailRunInput & { planningModelId: string; analysisModelId?: string; heroModelId?: string; imageModelId: string; editModelId: string; providerSnapshot?: ProviderSnapshot; xhsPromptPack?: XhsPromptPack };
+  const input = run.input as unknown as DetailRunInput & { planningModelId: string; analysisModelId?: string; heroModelId?: string; imageModelId: string; editModelId: string; providerSnapshot?: ProviderSnapshot; xhsPromptPack?: XhsPromptPack; ozon?: OzonContext };
   const cp = run.checkpoint as unknown as V4Checkpoint;
   cp.requests ??= {};
   cp.taskTiming = startTiming(cp.taskTiming);
@@ -372,7 +415,7 @@ async function executeV4(runId: string) {
       }
       // The provider may have accepted/billed a request even when no result reached us.
       cp.requestTimings![key] = { ...cp.requestTimings![key], ...touchTiming(cp.requestTimings![key], true) };
-      cp.requests![key] = { ...cp.requests![key], state: isStructuredSchemaRejection(error) || (error as { code?: string })?.code === "LOCAL_BUDGET_PAUSED" ? "rejected" : "uncertain", requestId, failureCode: (error as { code?: string })?.code, error: requestErrorMessage(error, "请求结果未确认，已有结果已保留。") };
+      cp.requests![key] = { ...cp.requests![key], state: isStructuredSchemaRejection(error) || (error as { code?: string })?.code === "LOCAL_BUDGET_PAUSED" ? "rejected" : "uncertain", requestId, failureCode: cp.ozon ? imageFailureCode(error) : (error as { code?: string })?.code, error: requestErrorMessage(cp.ozon ? { code: imageFailureCode(error), message: requestErrorMessage(error) } : error, "请求结果未确认，已有结果已保留。") };
       await persist();
       throw error;
     }
@@ -384,38 +427,68 @@ async function executeV4(runId: string) {
     const providerContext = await getProviderAdapter(input.providerSnapshot?.id, input.providerSnapshot, { legacyTextProtocol: !input.providerSnapshot });
     const { adapter, provider, apiKey } = providerContext;
     const { product: productImages, style: styleImages } = workflowReferenceAssets(current.assets);
-    const images = await Promise.all(productImages.map(a => imageData(a.id, projectId)));
-    const visualImages = [...images, ...await Promise.all(styleImages.map(a => imageData(a.id, projectId)))];
-    const referenceRoles = styleImages.length ? `参考图片按顺序：前${images.length}张是唯一商品身份与外观证据；其后${styleImages.length}张仅为风格参考，用于光线、色调、构图、细节放大和信息密度。风格参考中的文字、承诺、规格、商品结构不可作为事实或照抄；商品结构以原始商品图为准。` : "";
+    cp.ozon ??= input.ozon;
+    const ozon = cp.ozon;
+    const ozonRules = ozon?.rules || { grounding: ozonGroundingRules, planning: ozonPlanningRules, direction: ozonDirectionRules, review: ozonReviewRules };
+    const sourceIds = ozon?.sourceAssetIds || productImages.map(asset => asset.id);
+    const sourceImages = new Map(await Promise.all(sourceIds.map(async id => [id, await imageData(id, projectId)] as const)));
+    if (ozon && !ozon.analysis) {
+      await begin("PREPARE");
+      await requestOnce("OZON_ANALYSIS", requestId => invokeStructured({ ...textSettings(input.providerSnapshot || {}), apiKey, baseUrl: provider.baseUrl, model: input.analysisModelId || input.planningModelId, schema: ozonAnalysisSchema, system: `你是 Ozon 素材分析模型，只返回 JSON，填写 identity、references 和 facts。${ozonRules.grounding}`, input: JSON.stringify({ product: ozon.product, quantity: ozon.quantity, anchorAssetId: ozon.anchorAssetId, assetIds: sourceIds }), images: [...sourceImages.values()], timeoutMs: 90000, maxAttempts: 1, requestId, monitor: { projectId, runId, operation: "v4_ozon_analysis" } }), result => { ozon.analysis = validateOzonAnalysis(result, ozon); });
+      await end("PREPARE");
+    }
+    const safePixelIds = ozon ? ozon.analysis!.references.filter(row => ["same_product", "detail", "angle"].includes(row.role)).map(row => row.assetId) : sourceIds;
+    if (ozon) cp.answers.forEach((answer, index) => {
+      if (!answer.startsWith(SKIP_INPUT_PREFIX) && !ozon.analysis!.facts.some(fact => fact.id === `answer_${index}`)) ozon.analysis!.facts.push({ id: `answer_${index}`, claim: answer, sourceId: `input:answer_${index}`, kind: "specification", scope: "product" });
+    });
+    const images = safePixelIds.map(id => sourceImages.get(id)!);
+    const visualImages = ozon ? images : [...images, ...await Promise.all(styleImages.map(a => imageData(a.id, projectId)))];
+    const ozonPromptContext = ozon ? { ...ozon, rules: undefined } : undefined;
+    const referenceRoles = ozon ? `${ozonRules.image || ozonImageRules}\n本次售卖数量：${ozon.quantity?.text || "未知，不加入任何数量承诺"}。` : styleImages.length ? `参考图片按顺序：前${images.length}张是唯一商品身份与外观证据；其后${styleImages.length}张仅为风格参考，用于光线、色调、构图、细节放大和信息密度。风格参考中的文字、承诺、规格、商品结构不可作为事实或照抄；商品结构以原始商品图为准。` : "";
     await begin("PLAN");
     const description = input.xhsPromptPack?.brief ?? current.description;
-    const evidenceCatalog = [
+    const evidenceCatalog = ozon ? [
+      ...Object.entries(ozon.product).filter(([, text]) => Boolean(text)).map(([key, text]) => ({ id: `input:${key}`, kind: "input", text })),
+      ...cp.answers.flatMap((answer, index) => answer.startsWith(SKIP_INPUT_PREFIX) ? [] : [{ id: `input:answer_${index}`, kind: "input", text: answer }]),
+      ...ozon.analysis!.references.filter(row => row.role !== "excluded" && (row.role !== "variant" || row.variantConfirmed)).map(row => ({ id: row.assetId, kind: row.role, text: ozon.analysis!.facts.filter(fact => fact.sourceId === row.assetId).map(fact => fact.claim).join("\n") })),
+    ] : [
       { id: "user_description", kind: "description", text: description || "" },
       ...productImages.map(asset => ({ id: asset.id, kind: asset.type, fileName: asset.fileName })),
     ];
-    const sectionSlots = Array.from({ length: input.heroCount + input.detailCount }, (_, sectionIndex) => ({ sectionIndex, kind: sectionIndex < input.heroCount ? "HERO" : "DETAIL" }));
-    const coverageRules = input.mode === "xhs" ? "小红书图文仅按用户主题与配图数量创作，不要求电商八类内容覆盖；contentCoverage返回空数组。" : input.detailCount === 0
+    const sectionSlots = Array.from({ length: input.heroCount + input.detailCount }, (_, sectionIndex) => ({ sectionIndex, kind: sectionIndex < input.heroCount ? "HERO" : "DETAIL", ...(ozon ? { imageRole: ozonImageRole(sectionIndex, input.heroCount) } : {}) }));
+    const coverageRules = ozon ? "Ozon 按用户张数独立交付，不要求八类内容覆盖，contentCoverage=[]。" : input.mode === "xhs" ? "小红书图文仅按用户主题与配图数量创作，不要求电商八类内容覆盖；contentCoverage返回空数组。" : input.detailCount === 0
       ? "用户选择0张详情图，只生成指定数量的HERO，不得补充DETAIL。contentCoverage可引用承载对应内容的HERO下标；超出主图范围的模块标记not_applicable并说明用户仅要求主图，不因缺少详情图而要求补充信息。"
       : `${input.heroCount === 0 ? "用户选择0张主图，只生成指定数量的DETAIL，不得补充HERO。\n" : ""}${contentCoverageInstructions}`;
-    const planInput = JSON.stringify({ productName: current.name, description, platform: current.platform, language: input.language, userInstruction, answers: cp.answers, confirmedSupplementalAnswers: cp.confirmedSupplementalAnswers, evidenceCatalog, requestedHeroCount: input.heroCount, requestedDetailCount: input.detailCount, sectionSlots, contentCoverageRules: coverageRules, supplementalInputRules: supplementalInputInstructions });
+    const planInput = JSON.stringify({ productName: ozon ? ozon.product.title || ozon.analysis!.identity : current.name, description: ozon ? ozon.product.attributes : description, platform: ozon ? "ozon" : current.platform, language: input.language, userInstruction, answers: cp.answers, confirmedSupplementalAnswers: cp.confirmedSupplementalAnswers, evidenceCatalog, requestedHeroCount: input.heroCount, requestedDetailCount: input.detailCount, sectionSlots, contentCoverageRules: coverageRules, supplementalInputRules: ozon ? "缺少用户明确要求的关键资料时请求真实输入，不生成模拟规格候选。" : supplementalInputInstructions, ...(ozon ? { ozon: ozonPromptContext } : {}) });
     const confirmedEstimates = cp.confirmedSupplementalAnswers?.some(answer => answer.basis === "model_estimate") === true;
     let plan = cp.plan;
-    const requestPlanSchema: z.ZodType<WorkflowPlan> = input.mode === "xhs" ? xhsPlanSchema : planSchema;
+    const requestPlanSchema = ozon ? ozonPlanSchema : input.mode === "xhs" ? xhsPlanSchema : planSchema;
     // Planning includes image input and complete page copy. Responses may send
     // headers early while still generating; allow three minutes for completion.
-    if (!plan) plan = await requestOnce("PLAN", requestId => invokeStructured({ ...textSettings(input.providerSnapshot || {}), apiKey, baseUrl: provider.baseUrl, model: input.planningModelId, schema: requestPlanSchema, system: input.mode === "xhs"
+    if (!plan) plan = withPlanEvidence(await requestOnce("PLAN", requestId => invokeStructured({ ...textSettings(input.providerSnapshot || {}), apiKey, baseUrl: provider.baseUrl, model: input.planningModelId, schema: requestPlanSchema, system: ozon ? `${ozonRules.planning}\n事实来源根据 factIds 自动关联，无需重复输出 evidence；中性表达不要求绑定事实编号。\n本次总计 ${input.heroCount + input.detailCount} 张：HERO 恰好 ${input.heroCount} 张商品卡图片、DETAIL 恰好 ${input.detailCount} 张富文本详情图；sections 与 sectionSlots 一一对应，不增加额外总览、收口或规格页。` : input.mode === "xhs"
       ? `${input.xhsPromptPack?.planning || ""}\n你是小红书图文规划模型。只返回 JSON。按用户主题创作标题、正文、3–8个标签和恰好${input.detailCount}张3:4竖版配图的完整文案，全部 sections.kind 为 DETAIL，不生成 HERO。post 包含 title、caption、hashtags、language，遵守用户字数与语言要求；productName 是主题名。不要编造个人经历、事实数据、品牌功效或来源。普通知识/插画创作不需要商品材质、尺寸等参数，contentCoverage 返回空数组，不套用电商详情页八模块。只有确实阻止主题创作的信息才列入 missingFields；无需补充则为空。sections[].copy 写该图可见的完整文字，evidence 只用 evidenceCatalog 内的 ID。`
-      : `${buildCommerceSystemPrompt(current.platform, ["hero_search", "feature_proof", "lifestyle", "material_closeup", "specification", "trust", "summary"])}\n你是商品规划模型。只返回 JSON。写出有证据的商品事实、买家价值和完整的逐屏内容；未知字段放入 missingFields，不要设计字体、背景或工具调用。sections[].copy 是最终需要呈现的完整文案，包含标题、解释、标签与已知参数，每条独立文案换行，不写Markdown装饰或制作说明，不用只有标题的提纲代替内容。\n${input.detailCount === 0 ? coverageRules : "完整详情任务的 contentCoverage 逐项交代八类内容：covered 必须引用真实承载该内容的详情页下标（全套从0开始，不能只引用HERO）；needs_input 写明具体缺失资料；not_applicable 写明产品或用户范围依据。少屏可以合并内容模块，不允许用“简洁”“留白”作为省略理由。缺失的用户要求应进入missingFields。"}\n证据引用规则：sections[].evidence 只能填写 evidenceCatalog 中的 id（user_description 或真实资产 ID），不要填写自然语言证据句。`, input: planInput, images, timeoutMs: 180000, maxAttempts: 1, requestId, monitor: { projectId, runId, operation: "v4_plan" } }), result => { cp.plan = result; });
+      : `${buildCommerceSystemPrompt(current.platform, ["hero_search", "feature_proof", "lifestyle", "material_closeup", "specification", "trust", "summary"])}\n你是商品规划模型。只返回 JSON。写出有证据的商品事实、买家价值和完整的逐屏内容；未知字段放入 missingFields，不要设计字体、背景或工具调用。sections[].copy 是最终需要呈现的完整文案，包含标题、解释、标签与已知参数，每条独立文案换行，不写Markdown装饰或制作说明，不用只有标题的提纲代替内容。\n${input.detailCount === 0 ? coverageRules : "完整详情任务的 contentCoverage 逐项交代八类内容：covered 必须引用真实承载该内容的详情页下标（全套从0开始，不能只引用HERO）；needs_input 写明具体缺失资料；not_applicable 写明产品或用户范围依据。少屏可以合并内容模块，不允许用“简洁”“留白”作为省略理由。缺失的用户要求应进入missingFields。"}\n证据引用规则：sections[].evidence 只能填写 evidenceCatalog 中的 id（user_description 或真实资产 ID），不要填写自然语言证据句。`, input: planInput, images, timeoutMs: 180000, maxAttempts: 1, requestId, monitor: { projectId, runId, operation: "v4_plan" } }), result => { cp.plan = withPlanEvidence(result); }));
     if (!plan) throw new Error("规划结果为空");
     if (confirmedEstimates) plan = { ...plan, sections: plan.sections.map(section => ({ ...section, title: customerFacingCopy(section.title) || "商品信息", copy: customerFacingCopy(section.copy) })) };
     const expected = input.heroCount + input.detailCount;
-    const countIssues = [plan.sections.filter(s => s.kind === "HERO").length !== input.heroCount ? `HERO 数量必须为 ${input.heroCount}` : "", plan.sections.filter(s => s.kind === "DETAIL").length !== input.detailCount ? `DETAIL 数量必须为 ${input.detailCount}` : ""].filter(Boolean);
-    if (countIssues.length) throw new Error(countIssues.join("；"));
+    const imageRequestsStarted = cp.images.some(image => image.assetId || image.state !== "pending")
+      || Object.keys(cp.requests).some(key => key.startsWith("GENERATE:"))
+      || current.assets.some(asset => asset.type === "GENERATED" && (asset.metadata as { runId?: string } | null)?.runId === runId);
+    if (ozon && !cp.artDirection && !cp.requests.ART_DIRECTION && !cp.promptReview?.pages.length && !imageRequestsStarted) {
+      const repaired = reconcilePlanCounts(plan.sections, input.heroCount, input.detailCount);
+      if (repaired.changed) {
+        cp.planCountRepair ??= { originalSections: plan.sections, sourceIndexes: repaired.sourceIndexes, heroCount: input.heroCount, detailCount: input.detailCount };
+        plan = { ...plan, sections: repaired.sections };
+        cp.plan = plan;
+      }
+    }
+    const countIssue = planCountIssue(plan.sections, input.heroCount, input.detailCount, Boolean(ozon));
+    if (countIssue) throw new InvalidPlanCounts(countIssue);
     // Models sometimes return a useful evidence description instead of the
     // requested source ID. Keep that description grounded by mapping it to
     // the only valid source categories before the strict local check.
-    const evidenceIds = new Set(["user_description", ...productImages.map(asset => asset.id)]);
-    plan = {
+    const evidenceIds = new Set(ozon ? evidenceCatalog.map(row => row.id) : ["user_description", ...productImages.map(asset => asset.id)]);
+    if (!ozon) plan = {
       ...plan,
       sections: plan.sections.map(section => ({
         ...section,
@@ -425,16 +498,20 @@ async function executeV4(runId: string) {
         }),
       })),
     };
+    let referenceWarnings: string[] = [];
+    if (ozon) {
+      for (const section of plan.sections) assertOzonQuantityCopy(section.copy, ozon.quantity);
+      const normalized = normalizeOzonPlanReferences(plan.sections, ozon, evidenceCatalog.filter(row => row.kind === "input").map(row => row.id));
+      plan = { ...plan, sections: normalized.sections, contentCoverage: [] };
+      referenceWarnings = normalized.warnings;
+    }
     const unsupportedEvidence = plan.sections.flatMap(section => section.evidence.filter(id => !evidenceIds.has(id)).map(id => `${section.title}: ${id}`));
     const auditLanguage = plan.sections.some(section => /内部审查|模型判断|推理过程|待检查|审查话术/i.test(`${section.title}\n${section.copy}`));
-    if (unsupportedEvidence.length) throw new Error(`规划包含不存在的证据引用：${unsupportedEvidence.join("、")}`);
-    const imageRequestsStarted = cp.images.some(image => image.assetId || image.state !== "pending")
-      || Object.keys(cp.requests).some(key => key.startsWith("GENERATE:"))
-      || current.assets.some(asset => asset.type === "GENERATED" && (asset.metadata as { runId?: string } | null)?.runId === runId);
-    const content = input.mode === "xhs" ? { plan, warnings: [] } : prepareContentCoverage(plan, !cp.artDirection && !imageRequestsStarted);
+    if (unsupportedEvidence.length && !ozon) throw new Error(`规划包含不存在的证据引用：${unsupportedEvidence.join("、")}`);
+    const content = ozon || input.mode === "xhs" ? { plan, warnings: [] } : prepareContentCoverage(plan, !cp.artDirection && !imageRequestsStarted);
     plan = content.plan;
     cp.plan = plan;
-    cp.contentWarnings = [...new Set([...(cp.contentWarnings || []), ...content.warnings, ...(auditLanguage ? ["部分文案含制作说明，请在预览中核对措辞。"] : [])])];
+    cp.contentWarnings = [...new Set([...(cp.contentWarnings || []), ...referenceWarnings, ...content.warnings, ...(auditLanguage ? ["部分文案含制作说明，请在预览中核对措辞。"] : [])])];
     cp.contentRepairRequested = false;
     if (cp.lastError?.stage === "PLAN") cp.lastError = undefined;
     // For detail-page creation the model lists missing information; it cannot waive confirmation by
@@ -448,7 +525,7 @@ async function executeV4(runId: string) {
       // selection is not numerical confirmation, even though it was submitted.
       const requiredFields = [...new Set([...plan.missingFields.map(field => field.field), ...incompleteEstimates.flatMap(answer => answer.fields)])];
       cp.questions = normalizeSupplementalQuestions(cp.questions || supplementalQuestionsFromFields(plan.missingFields));
-      let issue = supplementalQuestionIssues(normalizeSupplementalQuestions(cp.questions), requiredFields);
+      let issue = ozon ? null : supplementalQuestionIssues(normalizeSupplementalQuestions(cp.questions), requiredFields);
       if (issue && (cp.requests.INPUT_SUGGESTIONS?.state !== "completed" || cp.retryAuthorized?.includes("INPUT_SUGGESTIONS"))) {
         await begin("INPUT_SUGGESTIONS");
         await requestOnce("INPUT_SUGGESTIONS", requestId => invokeStructured({
@@ -489,22 +566,26 @@ async function executeV4(runId: string) {
     await end("PLAN");
     await begin("ART_DIRECTION");
     const requestDirectionSchema = directionSchema.extend({ sections: directionSchema.shape.sections.length(expected) });
-    const art = cp.artDirection ?? await requestOnce("ART_DIRECTION", requestId => invokeStructured({ ...textSettings(input.providerSnapshot || {}), apiKey, baseUrl: provider.baseUrl, model: input.planningModelId, schema: requestDirectionSchema, system: input.xhsPromptPack?.artDirection || `${buildCommerceSystemPrompt(current.platform, ["hero_search", "feature_proof", "lifestyle", "material_closeup", "specification", "trust", "summary"])}\n${confirmedAnswerCopyRules}\n你是视觉分镜模型。只返回完整 JSON。根据完整内容任务设计每张图的构图、光线、场景、文字和信息模块，sectionIndex必须对应规划从0开始的下标。plan.sections[].copy 是内容基础，可以自然润色标题、调整句式、标点和换行，无需逐字复刻；保持完整买家信息、参数标签、数值、单位和尺寸表，不把完整页面简化成只有标题。不要删除页面，不要编造规格。每张最终prompt必须完整描述主体、镜头、环境、光线、配色、细节/信息模块与排版，最终可见文字以textBlocks为准；不能只写标题或依赖前一张图。按内容安排场景、微距、标注、信息图与规格表，避免所有页面同一背景加整件产品。`, input: JSON.stringify({ plan, expectedSectionCount: expected, sectionSlots, sectionIndexRule: "Return exactly one section per slot, with unique sectionIndex from 0 to expectedSectionCount - 1. Do not merge or omit slots.", platform: current.platform, language: input.language, userInstruction, referenceRoles, brief: input.xhsPromptPack?.brief }), images: visualImages, timeoutMs: Math.max(90000, Math.min(180000, expected * 15000)), maxAttempts: 1, requestId, monitor: { projectId, runId, operation: "v4_art_direction" } }).catch(error => { if (error instanceof z.ZodError) throw new InvalidStoryboard(`视觉分镜结构不合格，需要 ${expected} 张完整分镜。请确认后仅重试分镜，已完成规划会保留。`); throw error; }), result => { cp.artDirection = result; });
+    const art = cp.artDirection ?? await requestOnce("ART_DIRECTION", requestId => invokeStructured({ ...textSettings(input.providerSnapshot || {}), apiKey, baseUrl: provider.baseUrl, model: input.planningModelId, schema: requestDirectionSchema, system: ozon ? ozonRules.direction : input.xhsPromptPack?.artDirection || `${buildCommerceSystemPrompt(current.platform, ["hero_search", "feature_proof", "lifestyle", "material_closeup", "specification", "trust", "summary"])}\n${confirmedAnswerCopyRules}\n你是视觉分镜模型。只返回完整 JSON。根据完整内容任务设计每张图的构图、光线、场景、文字和信息模块，sectionIndex必须对应规划从0开始的下标。plan.sections[].copy 是内容基础，可以自然润色标题、调整句式、标点和换行，无需逐字复刻；保持完整买家信息、参数标签、数值、单位和尺寸表，不把完整页面简化成只有标题。不要删除页面，不要编造规格。每张最终prompt必须完整描述主体、镜头、环境、光线、配色、细节/信息模块与排版，最终可见文字以textBlocks为准；不能只写标题或依赖前一张图。按内容安排场景、微距、标注、信息图与规格表，避免所有页面同一背景加整件产品。`, input: JSON.stringify({ plan, expectedSectionCount: expected, sectionSlots, sectionIndexRule: "Return exactly one section per slot, with unique sectionIndex from 0 to expectedSectionCount - 1. Do not merge or omit slots.", platform: current.platform, language: input.language, userInstruction, referenceRoles, ...(ozon ? { ozon: ozonPromptContext } : {}), brief: input.xhsPromptPack?.brief }), images: visualImages, timeoutMs: Math.max(90000, Math.min(180000, expected * 15000)), maxAttempts: 1, requestId, monitor: { projectId, runId, operation: "v4_art_direction" } }).catch(error => { if (error instanceof z.ZodError) throw new InvalidStoryboard(`视觉分镜结构不合格，需要 ${expected} 张完整分镜。请确认后仅重试分镜，已完成规划会保留。`); throw error; }), result => { cp.artDirection = result; });
     const savedSections = await prisma.pageSection.findMany({ where: { projectId, sectionKey: { in: plan.sections.map((_, index) => `v4-${index}`) } }, orderBy: { order: "asc" } });
     const artIssue = storyboardIssue(art.sections, expected);
     if (artIssue) throw new InvalidStoryboard(artIssue);
     art.sections.sort((a, b) => a.sectionIndex - b.sectionIndex);
-    const readableCopy = prepareReadableCopy(plan.sections, confirmedEstimates ? art.sections.map(cleanCustomerDirection) : art.sections);
+    const directedSections = confirmedEstimates ? art.sections.map(cleanCustomerDirection) : art.sections;
+    const readableCopy = ozon ? { sections: directedSections, warnings: [] } : prepareReadableCopy(plan.sections, directedSections);
     const normalizedArt = { ...art, sections: readableCopy.sections.map((section) => ({ ...section, textBlocks: normalizeTypesetting(section.textBlocks as V4TextBlock[]) })) };
+    if (ozon) for (const section of normalizedArt.sections) assertOzonQuantityCopy(section.textBlocks.map(block => block.text).join("\n"), ozon.quantity);
     cp.artDirection = normalizedArt;
     cp.contentWarnings = [...new Set([...(cp.contentWarnings || []), ...readableCopy.warnings])];
     if (cp.lastError?.stage === "ART_DIRECTION") cp.lastError = undefined;
     const renderDirections = input.xhsPromptPack
       ? normalizedArt.sections.map(section => ({ ...section, prompt: withXhsVisualMaster(section.prompt, normalizedArt, input.xhsPromptPack!) }))
       : normalizedArt.sections;
-    const sections = materializeImagePrompts(savedSections, renderDirections, confirmedEstimates).map(section => ({ ...section, visualPrompt: referenceRoles ? `${referenceRoles}\n${section.visualPrompt}` : section.visualPrompt }));
+    const sections = materializeImagePrompts(savedSections, renderDirections, confirmedEstimates, ozon ? { productRules: referenceRoles, heroCount: input.heroCount, concept: normalizedArt.concept, palette: normalizedArt.palette, typography: normalizedArt.typography } : undefined).map(section => ({ ...section, visualPrompt: !ozon && referenceRoles ? `${referenceRoles}\n${section.visualPrompt}` : section.visualPrompt,
+      ...(ozon ? { editableData: json({ ...(section.editableData as object || {}), ozon: { imageRole: ozonImageRole(section.order, input.heroCount), referenceAssetIds: ozonPixelReferences(ozon, plan.sections[section.order].referenceAssetIds, plan.sections[section.order].variantOverview), variantOverview: Boolean(plan.sections[section.order].variantOverview), factIds: plan.sections[section.order].factIds || [], facts: ozon.analysis!.facts.filter(fact => plan.sections[section.order].factIds?.includes(fact.id)), quantity: ozon.quantity, ruleVersion: ozon.version } }) } : {}),
+    }));
     if (cp.promptReview) {
-      if (!cp.promptReview.pages.length) cp.promptReview = { revision: cp.promptReview.revision + 1, pages: sections.map(section => ({ sectionId: section.id, title: section.title, kind: section.type === "HERO" ? "HERO" : "DETAIL", prompt: section.visualPrompt })) };
+      if (!cp.promptReview.pages.length) cp.promptReview = { revision: cp.promptReview.revision + 1, pages: sections.map(section => ({ sectionId: section.id, title: section.title, kind: section.type === "HERO" ? "HERO" : "DETAIL", prompt: section.visualPrompt, ...(ozon ? { imageRole: ozonImageRole(section.order, input.heroCount) } : {}) })) };
       if (sections.length !== cp.promptReview.pages.length || sections.some((section, index) => section.id !== cp.promptReview!.pages[index].sectionId)) throw new PromptReviewConflict("页面列表与已保存提示词不一致，未发起图片请求。");
       // Use the exact saved/approved string on every resume, never compile over user edits.
       sections.forEach((section, index) => { section.visualPrompt = cp.promptReview!.pages[index].prompt; });
@@ -553,19 +634,19 @@ async function executeV4(runId: string) {
       progress.state = "generating"; await persist(`GENERATE:${section.title}`);
       try {
         await requestOnce(key, async requestId => {
-          const source = cp.requests![key].resultSource ?? await adapter.generateImageOnce({ model: section.type === "HERO" ? input.heroModelId || input.imageModelId : input.imageModelId, prompt: section.visualPrompt, quality: input.quality, background: settings.background, outputFormat: settings.outputFormat, outputCompression: settings.outputCompression, moderation: settings.moderation, ...(settings.size && settings.size !== "auto" ? { size: settings.size } : { aspectRatio: section.type === "HERO" ? "1:1" : "3:4" }), referenceImages: visualImages, timeoutMs: 180000, monitor: { projectId, sectionId: section.id, runId, operation: "v4_image_generation" },
+          const source = cp.requests![key].resultSource ?? await adapter.generateImageOnce({ model: section.type === "HERO" ? input.heroModelId || input.imageModelId : input.imageModelId, prompt: section.visualPrompt, quality: input.quality, background: settings.background, outputFormat: settings.outputFormat, outputCompression: settings.outputCompression, moderation: settings.moderation, ...(ozon ? ozonImageParameters(input.providerSnapshot || provider, section.type === "HERO" ? input.heroModelId || input.imageModelId : input.imageModelId, settings.size) : settings.size && settings.size !== "auto" ? { size: settings.size } : { aspectRatio: section.type === "HERO" ? "1:1" : "3:4" }), referenceImages: ozon ? ozonPixelReferences(ozon, plan.sections[section.order].referenceAssetIds, plan.sections[section.order].variantOverview).map(id => sourceImages.get(id)!) : visualImages, timeoutMs: 180000, monitor: { projectId, sectionId: section.id, runId, operation: "v4_image_generation" },
             upstreamTask: cp.requests![key].upstreamTask,
             onUpstreamTask: async task => { cp.requests![key].upstreamTask = task; await persist(); },
             beforeSubmit: async () => { if (cp.recoverImagesOnly) throw new Error("仅恢复已有图片，禁止提交新的生图请求。"); await lease.assertActive(); },
           });
           if (source.url) { cp.requests![key].resultSource = { url: source.url }; await persist(); }
-          const asset = await saveGeneratedImage({ projectId, sectionId: section.id, prompt: section.visualPrompt, source, metadata: { runId, requestId, workflowVersion: 4 } });
+          const asset = await saveGeneratedImage({ projectId, sectionId: section.id, prompt: section.visualPrompt, source, beforeSave: () => lease.transaction(async () => {}, true), metadata: { runId, requestId, workflowVersion: 4, ...(ozon ? { ozon: (section.editableData as Record<string, unknown>).ozon } : {}) } });
           await lease.transaction(async tx => { await tx.pageSection.update({ where: { id: section.id }, data: { currentImageAssetId: asset.id, status: "SUCCESS" } }); }, true);
           return asset;
         }, asset => { progress.assetId = asset.id; progress.state = "generated"; });
       } catch (error) {
         if (error instanceof RunHalted) throw error;
-        progress.state = "uncertain"; cp.lastError = { stage: "GENERATE", code: (error as { code?: string })?.code || (isTimeout(error) ? "TIMEOUT" : "IMAGE_REQUEST_FAILED"), message: requestErrorMessage(error, "模型请求未完成，请核对调用记录后再决定是否重新请求。"), retryable: false }; await persist();
+        progress.state = "uncertain"; cp.lastError = { stage: "GENERATE", code: ozon ? imageFailureCode(error) : (error as { code?: string })?.code || (isTimeout(error) ? "TIMEOUT" : "IMAGE_REQUEST_FAILED"), message: requestErrorMessage(ozon ? { code: imageFailureCode(error), message: requestErrorMessage(error) } : error, "模型请求未完成，请核对调用记录后再决定是否重新请求。"), retryable: false }; await persist();
         // Drain issued calls, but do not send every image to an unsupported route.
         if (isImageEndpointError(error)) throw error;
       }
@@ -593,13 +674,25 @@ async function executeV4(runId: string) {
     for (const progress of cp.images.filter(i => i.assetId && i.state === "generated")) {
       try {
         const reviewImage = await imageData(progress.assetId!, projectId);
-        await requestOnce(`IMAGE_REVIEW:${progress.sectionId}`, requestId => invokeStructured({ ...textSettings(input.providerSnapshot || {}), apiKey, baseUrl: provider.baseUrl, model: input.analysisModelId || input.planningModelId, schema: imageReviewSchema, system: `你是图片质检模型。只返回 JSON。如有 approvedPrompt，以其中用户确认的构图和画面文字为准，不要求恢复原分镜的措辞；商品事实仍须核对。检查商品一致性、事实准确性、排版可读性、构图和连续性，只报告实际问题。标题同义改写、标点和换行差异不算缺陷；不要逐字对照规划文案，关注事实、参数、完整信息和可读性。${confirmedAnswerCopyRules}缺少内部来源说明不算图片缺陷。`, input: JSON.stringify({ approvedPrompt: cp.promptReview?.approvedAt ? sections.find(s => s.id === progress.sectionId)?.visualPrompt : undefined, section: sections.find(s => s.id === progress.sectionId)?.title, plan: cp.plan, art: cp.artDirection?.sections.find(s => s.sectionIndex === sections.find(s => s.id === progress.sectionId)?.order) }), images: [reviewImage], timeoutMs: 45000, maxAttempts: 1, requestId, monitor: { projectId, sectionId: progress.sectionId, runId, operation: "v4_image_review" } }), review => {
+        await requestOnce(`IMAGE_REVIEW:${progress.sectionId}`, requestId => invokeStructured({ ...textSettings(input.providerSnapshot || {}), apiKey, baseUrl: provider.baseUrl, model: input.analysisModelId || input.planningModelId, schema: imageReviewSchema, system: ozon ? `${ozonRules.review}\n你是图片质检模型。只返回 JSON。以 approvedPrompt 中批准的画面指令和 Exact copy 为准；历史任务没有批准提示词时使用 art.prompt 和 art.textBlocks。检查商品事实、所用参数、文案可读性和本图构图。允许简短文案及按要求无字，不比较候选正文长度，不要求补回规划 copy，不把制作说明当作应上图文字。只报告实际可见问题，缺少内部来源说明不算缺陷。` : `你是图片质检模型。只返回 JSON。如有 approvedPrompt，以其中用户确认的构图和画面文字为准，不要求恢复原分镜的措辞；商品事实仍须核对。检查商品一致性、事实准确性、排版可读性、构图和连续性，只报告实际问题。标题同义改写、标点和换行差异不算缺陷；不要逐字对照规划文案，关注事实、参数、完整信息和可读性。${confirmedAnswerCopyRules}缺少内部来源说明不算图片缺陷。`, input: JSON.stringify({ approvedPrompt: cp.promptReview?.approvedAt ? sections.find(s => s.id === progress.sectionId)?.visualPrompt : undefined, section: sections.find(s => s.id === progress.sectionId)?.title, ...(ozon ? { ozon: ozonPromptContext } : {}), plan: ozon ? undefined : cp.plan, art: cp.artDirection?.sections.find(s => s.sectionIndex === sections.find(s => s.id === progress.sectionId)?.order) }), images: ozon ? [sourceImages.get(ozon.anchorAssetId)!, reviewImage] : [reviewImage], timeoutMs: 45000, maxAttempts: 1, requestId, monitor: { projectId, sectionId: progress.sectionId, runId, operation: "v4_image_review" } }), review => {
           const result = { ...review, passed: review.passed && !review.issues.some(issue => issue.severity === "error") };
           progress.check = result; progress.state = "checked"; cp.imageReviews[progress.sectionId] = result;
         });
       } catch (error) {
         if (error instanceof RunHalted) throw error;
         cp.lastError = { stage: "IMAGE_REVIEW", code: isTimeout(error) ? "TIMEOUT" : "REVIEW_FAILED", message: requestErrorMessage(error, "图片检查未完成，图片已保留，请人工核对。"), retryable: false }; await persist();
+      }
+    }
+    if (ozon) {
+      const outputAssets = await prisma.productAsset.findMany({ where: { id: { in: cp.images.flatMap(image => image.assetId ? [image.assetId] : []) } }, select: { id: true, metadata: true } });
+      for (const image of cp.images) {
+        const delivery = (outputAssets.find(asset => asset.id === image.assetId)?.metadata as { ozon?: { delivery?: { ratioValid: boolean } } } | null)?.ozon?.delivery;
+        if (delivery && !delivery.ratioValid) {
+          const issue = { kind: "layout" as const, severity: "error" as const, message: "实际图片比例不符合3:4；原图已保留，未自动裁切或重生。" };
+          image.check = { passed: false, issues: [...(image.check?.issues || []).filter(item => item.message !== issue.message), issue] };
+          cp.imageReviews[image.sectionId] = image.check;
+          cp.contentWarnings = [...new Set([...(cp.contentWarnings || []), `${image.title}：${issue.message}`])];
+        }
       }
     }
     await end("IMAGE_REVIEW");
@@ -621,7 +714,7 @@ async function executeV4(runId: string) {
           try {
             const groupImages = await Promise.all(reviewImages.map(image => imageData(image.assetId!, projectId)));
             // Full-plan visual checks need the same bounded wait as planning; timeout still requires explicit retry.
-            await requestOnce(key, requestId => invokeStructured({ ...textSettings(input.providerSnapshot || {}), apiKey, baseUrl: provider.baseUrl, model: input.analysisModelId || input.planningModelId, schema: setReviewSchema, system: `你是整套页面检查模型。只返回 JSON。如有 approvedPrompts，以其中用户确认的构图和画面文字为准，不要求恢复原分镜的措辞；商品事实仍须核对。标题同义改写、标点和换行差异不算缺陷；只检查意思丢失、错误参数或不可读文字。依据plan.contentCoverage和逐屏copy检查实际图片的信息覆盖、商品一致性、重复构图、文字与连续性。imageOrder 给出本组图片的全套 sectionIndex，issues.sectionIndexes 必须引用这些全套下标。超过12张时分组检查，本组看不到的图片不要猜测。视觉统一不能以删除内容换取；只有内容错误、遮挡或不可读才指出具体问题。不删除图片，不要求全套改成纯色背景。${confirmedAnswerCopyRules}缺少内部来源说明不算图片缺陷。`, input: JSON.stringify({ approvedPrompts: cp.promptReview?.approvedAt ? cp.promptReview.pages : undefined, plan: cp.plan, artDirection: cp.artDirection, imageOrder: reviewImages.map((image, index) => ({ sectionIndex: start + index, title: image.title })) }), images: groupImages, timeoutMs: 180000, maxAttempts: 1, requestId, monitor: { projectId, runId, operation: "v4_set_review" } }), result => { cp.setReviewGroups![key] = { assetIds: groupAssets, result }; });
+            await requestOnce(key, requestId => invokeStructured({ ...textSettings(input.providerSnapshot || {}), apiKey, baseUrl: provider.baseUrl, model: input.analysisModelId || input.planningModelId, schema: setReviewSchema, system: ozon ? `${ozonRules.review}\n你是整套页面检查模型。只返回 JSON。以 approvedPrompts 中批准的各图任务及 Exact copy 为准；没有批准提示词的历史任务使用 artDirection。核对商品及参数准确性、共享视觉风格、主附层级、重复构图和可读性。简短文案及按要求无字不算缺陷，不按候选正文长度或八类模块检查覆盖，不要求补回规划 copy 或相邻边缘连续。imageOrder 给出本组图片的全套 sectionIndex，issues.sectionIndexes 引用这些下标；本组看不到的图片不要猜测。只报告实际可见问题，保留图片，不要求自动重生。缺少内部来源说明不算缺陷。` : `你是整套页面检查模型。只返回 JSON。如有 approvedPrompts，以其中用户确认的构图和画面文字为准，不要求恢复原分镜的措辞；商品事实仍须核对。标题同义改写、标点和换行差异不算缺陷；只检查意思丢失、错误参数或不可读文字。依据plan.contentCoverage和逐屏copy检查实际图片的信息覆盖、商品一致性、重复构图、文字与连续性。imageOrder 给出本组图片的全套 sectionIndex，issues.sectionIndexes 必须引用这些全套下标。超过12张时分组检查，本组看不到的图片不要猜测。视觉统一不能以删除内容换取；只有内容错误、遮挡或不可读才指出具体问题。不删除图片，不要求全套改成纯色背景。${confirmedAnswerCopyRules}缺少内部来源说明不算图片缺陷。`, input: JSON.stringify({ approvedPrompts: cp.promptReview?.approvedAt ? cp.promptReview.pages : undefined, plan: ozon ? undefined : cp.plan, ...(ozon ? { ozon: ozonPromptContext } : {}), artDirection: cp.artDirection, imageOrder: reviewImages.map((image, index) => ({ sectionIndex: start + index, title: image.title })) }), images: ozon ? [sourceImages.get(ozon.anchorAssetId)!, ...groupImages] : groupImages, timeoutMs: 180000, maxAttempts: 1, requestId, monitor: { projectId, runId, operation: "v4_set_review" } }), result => { cp.setReviewGroups![key] = { assetIds: groupAssets, result }; });
           } catch (error) {
             if (error instanceof RunHalted) throw error;
             cp.lastError = { stage: "SET_REVIEW", code: isTimeout(error) ? "TIMEOUT" : "REVIEW_FAILED", message: requestErrorMessage(error, "整套检查未完成，图片已保留，请人工核对。"), retryable: false }; await persist();
@@ -653,7 +746,7 @@ async function executeV4(runId: string) {
       return;
     }
     cp.taskTiming = touchTiming(cp.taskTiming!, true);
-    cp.lastError = { stage: cp.stage, code: error instanceof InvalidStoryboard ? error.code : isStructuredSchemaRejection(error) ? "PROVIDER_SCHEMA_REJECTED" : isTimeout(error) ? "TIMEOUT" : "WORKFLOW_FAILED", message: requestErrorMessage(error, "当前步骤未完成，草稿和已生成的图片已保留。"), retryable: isStructuredSchemaRejection(error) };
+    cp.lastError = { stage: cp.stage, code: error instanceof InvalidStoryboard || error instanceof InvalidPlanCounts ? error.code : isStructuredSchemaRejection(error) ? "PROVIDER_SCHEMA_REJECTED" : cp.ozon ? imageFailureCode(error) : isTimeout(error) ? "TIMEOUT" : "WORKFLOW_FAILED", message: requestErrorMessage(error, "当前步骤未完成，草稿和已生成的图片已保留。"), retryable: isStructuredSchemaRejection(error) };
     await persistQueue.catch(() => undefined);
     try { await lease.transaction(async tx => { await tx.detailRun.update({ where: { id: runId }, data: { status: cp.images.some(i => i.assetId) ? "PARTIAL" : "FAILED", stage: `「${cp.stage}」阶段未完成，草稿已保留`, error: cp.lastError!.message, checkpoint: json(cp) } }); }); } catch (failure) { if (!(failure instanceof RunHalted)) throw failure; }
   } finally {

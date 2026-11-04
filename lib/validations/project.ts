@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ozonProductSchema, ozonReferencesSchema } from "@/lib/ozon/contract";
 
 import { platformOptions, styleOptions } from "@/types/domain";
 import { HERO_MIN, HERO_MAX, DETAIL_MIN, DETAIL_MAX, hasOutputImages, OUTPUT_COUNT_ERROR } from "@/lib/utils/image-counts";
@@ -13,6 +14,8 @@ export const projectCreateSchema = z.object({
   platform: z.enum(platformOptions),
   style: z.enum(styleOptions),
   description: z.string().trim().optional().nullable(),
+  ozonProduct: ozonProductSchema.optional(),
+  ozonReferences: ozonReferencesSchema.optional(),
 });
 
 export const projectUpdateSchema = projectCreateSchema.partial().extend({

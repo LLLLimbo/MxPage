@@ -11,7 +11,7 @@ assert.match(snapshotService, /updatedAt: current\.updatedAt/);
 assert.match(snapshotService, /prisma\.project\.updateMany/);
 assert.match(snapshotService, /maxSnapshotUpdateAttempts = 5/);
 assert.match(snapshotService, /mergeSnapshotValue\(current\.modelSnapshot, snapshotPatch\)/);
-assert.match(projectService, /patchProjectModelSnapshot\(projectId, modelSnapshot\)/);
+assert.match(projectService, /patchProjectModelSnapshot\(projectId, snapshotPatch\)/);
 assert.match(analysisService, /patchProjectModelSnapshot\(projectId, \{[\s\S]*analysisModelId: model/);
 assert.doesNotMatch(analysisService, /modelSnapshot: \{[\s\S]*analysisModelId: model/);
 assert.match(plannerService, /patchProjectModelSnapshot\(projectId, \{ previewConfig \}\)/);

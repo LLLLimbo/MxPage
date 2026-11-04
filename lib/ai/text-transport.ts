@@ -5,6 +5,7 @@ import { getRequestProviderCredentials } from "@/lib/services/provider-runtime";
 import type { AiMonitorContext } from "./provider-client";
 import { normalizeOpenAiBaseUrl, resolvedTextSettings, textEndpoint, type TextSettings } from "./text-protocol";
 import { nativeCompletion, nativeHeaders, nativeRequest, textHeaders } from "./native-text";
+import { hasContentRefusal, contentRefusalError } from "./content-refusal";
 export type TextCall = TextSettings & {
   apiKey: string; baseUrl: string; model: string; system: string; input: string;
   images?: string[]; schema?: z.ZodType; timeoutMs: number; requestId?: string;
@@ -70,6 +71,7 @@ export function parseTextResponse(body: string, protocol: string) {
     }
     if (!payload) throw new Error("Provider stream interrupted before response.completed; request outcome uncertain.");
   } else payload = JSON.parse(body);
+  if (hasContentRefusal(payload)) throw contentRefusalError();
   if (protocol === "anthropic_messages" || protocol === "gemini_native") {
     const completion = nativeCompletion(payload, protocol);
     const text = completion.choices[0].message.content;

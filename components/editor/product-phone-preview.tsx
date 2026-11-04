@@ -10,10 +10,13 @@ import { ImageGenerationLoading } from "@/components/shared/image-generation-loa
 export type PreviewSection = {
   id: string; type: string; title: string; order: number; imageUrl?: string | null;
   currentImageAssetId?: string | null;
+  editableData?: { ozon?: unknown };
   currentImageAsset?: { metadata?: unknown } | null;
 };
 
 export function imageReview(section: PreviewSection, progress: ImageProgress[]) {
+  const delivery = (section.currentImageAsset?.metadata as { ozon?: { delivery?: { ratioValid: boolean } } } | null)?.ozon?.delivery;
+  if (delivery && !delivery.ratioValid) return { assetId: section.currentImageAssetId || undefined, passed: false, issues: ["实际图片比例不符合3:4；原图已保留，未自动裁切或重生。"] };
   const saved = (section.currentImageAsset?.metadata as { visualCheck?: ImageProgress["check"] } | null)?.visualCheck;
   const entry = progress.find(p => p.sectionId === section.id);
   const latest = entry?.check;
@@ -29,6 +32,7 @@ export function imageReview(section: PreviewSection, progress: ImageProgress[]) 
 }
 
 export function ProductImage({ section, progress, square = false }: { section: PreviewSection; progress: ImageProgress[]; square?: boolean }) {
+  if (section.editableData?.ozon || (section.currentImageAsset?.metadata as { ozon?: unknown } | null)?.ozon) square = false;
   const [failedUrl, setFailedUrl] = useState<string>();
   const pending = progress.find(p => p.sectionId === section.id);
   const generating = pending?.state === "generating";
@@ -95,8 +99,8 @@ function GenericProductPhonePreview({ name, platform, sections, progress, select
               <button type="button" aria-label="下一张头图" disabled={heroes.length < 2} className="rounded-lg p-2 hover:bg-neutral-100 disabled:opacity-30" onClick={() => selectHero((heroIndex + 1) % heroes.length)}><ChevronRight size={16}/></button>
             </div>
           </section>}
-          <div className="border-b border-neutral-100 px-4 py-4"><h3 className="break-words text-base font-semibold leading-6">{name}</h3><p className="mt-1 text-xs text-neutral-500">{heroes.length} 张头图 · {details.length} 张详情图</p></div>
-          <div ref={detailStart} className="bg-neutral-50 px-4 py-3 text-sm font-medium">商品详情</div>
+          <div className="border-b border-neutral-100 px-4 py-4"><h3 className="break-words text-base font-semibold leading-6">{name}</h3><p className="mt-1 text-xs text-neutral-500">{heroes.length} 张{platform === "Ozon" ? "商品卡图片" : "头图"} · {details.length} 张{platform === "Ozon" ? "富文本详情图" : "详情图"}</p></div>
+          <div ref={detailStart} className="bg-neutral-50 px-4 py-3 text-sm font-medium">{platform === "Ozon" ? "富文本详情图" : "商品详情"}</div>
           <div data-testid="phone-detail-images">{details.map(s => <button type="button" key={s.id} aria-label={`选择详情图：${s.title}`} aria-pressed={selected === s.id} onClick={() => onSelect(s.id)} className="relative block w-full border-0 p-0 text-left leading-none focus-visible:z-10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-neutral-500"><ProductImage section={s} progress={progress}/>{selected === s.id && <span aria-hidden="true" className="pointer-events-none absolute inset-0 ring-2 ring-inset ring-neutral-500/70"/>}</button>)}</div>
           {!sections.length && <div className="flex min-h-64 items-center justify-center p-8 text-center text-sm text-neutral-500">生成的图片会逐张出现在这里</div>}
           <p className="px-4 py-6 text-center text-[11px] text-neutral-400">已到底部 · MxPage 预览</p>

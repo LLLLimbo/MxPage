@@ -1,4 +1,6 @@
 "use client";
+import { OzonProductFields } from "@/components/ozon/product-fields";
+import { ozonProductSchema, type OzonProduct } from "@/lib/ozon/contract";
 import { createClientId } from "@/lib/utils/client-id";
 import { heroCountOptions, detailCountOptions, hasOutputImages, OUTPUT_COUNT_ERROR } from "@/lib/utils/image-counts";
 import Link from "next/link";
@@ -18,25 +20,26 @@ import { StyleReferencePicker } from "./style-reference-picker";
 import { translationQueue } from "@/lib/translation/client-queue";
 import { validateUploadFiles } from "@/lib/storage/upload-limits";
 
-type Group = { key: string; name: string; files: File[] };
-type Batch = { id: string; status: string; error?: string | null; items: { projectId: string; ready?: boolean; language?: ContentLanguage; runId?: string; name: string; status: string; message: string; translationProgress?: { completed: number; failed: number; total: number }; failures?: { title: string; message: string }[]; images: { id: string; type: string; url: string | null }[] }[] };
+type Group = { key: string; name: string; files: File[]; product?: OzonProduct };
+type Batch = { contentProfile?: string; id: string; status: string; error?: string | null; items: { projectId: string; ready?: boolean; language?: ContentLanguage; runId?: string; name: string; status: string; message: string; translationProgress?: { completed: number; failed: number; total: number }; failures?: { title: string; message: string }[]; images: { id: string; type: string; url: string | null }[] }[] };
 const labels: Record<string, string> = { QUEUED: "等待生成", RUNNING: "生成中", PENDING: "准备中", COMPLETED: "已完成", PARTIAL: "部分完成 · 需检查", WAITING_INPUT: "需要补充信息", WAITING_PROMPTS: "等待确认提示词", FAILED: "未完成", INTERRUPTED: "已中断", CANCELED: "已停止" };
 import { ApiRequestError, fetchApiProgress, readApiResponse as data, requestErrorMessage } from "@/lib/utils/request-error";
 const post = (url: string, body: unknown) => fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then(data);
 
-export function BatchDetailWorkspace({ translation = false }: { translation?: boolean }) {
+export function BatchDetailWorkspace({ translation = false, ozon = false }: { translation?: boolean; ozon?: boolean }) {
   const router = useRouter();
-  const imageModels = useImageCapabilities(translation ? "edit" : "hero,detail");
-  const storageKey = translation ? "mxpage:last-translation-batch" : "mxpage:last-detail-batch";
+
+  const storageKey = translation ? "mxpage:last-translation-batch" : ozon ? "mxpage:last-ozon-batch" : "mxpage:last-detail-batch";
   const [uploadMode, setUploadMode] = useState<"single" | "multiple" | "folder">("single");
   const [languages, setLanguages] = useState<ContentLanguage[]>(["en-US"]);
   const [groups, setGroups] = useState<Group[]>([]);
   const [ignored, setIgnored] = useState(0);
-  const [platform, setPlatform] = useState("general_ecommerce");
-  const [language, setLanguage] = useState("zh-CN");
+  const [platform, setPlatform] = useState(ozon ? "ozon" : "general_ecommerce");
+  const [language, setLanguage] = useState(ozon ? "ru-RU" : "zh-CN");
   const [quality, setQuality] = useState("auto");
-  const [heroCount, setHeroCount] = useState(4);
-  const [detailCount, setDetailCount] = useState(6);
+  const [heroCount, setHeroCount] = useState(ozon ? 5 : 4);
+  const [detailCount, setDetailCount] = useState(ozon ? 0 : 6);
+  const imageModels = useImageCapabilities(translation ? "edit" : [...(heroCount ? ["hero"] : []), ...(detailCount ? ["detail"] : [])].join(","));
   const [description, setDescription] = useState("");
   const [direction, setDirection] = useState("");
   const [styleFiles, setStyleFiles] = useState<File[]>([]);
@@ -62,7 +65,7 @@ export function BatchDetailWorkspace({ translation = false }: { translation?: bo
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout>;
     async function poll() {
-      try { const value = await fetchApiProgress(`/api/detail-batches/${batchId}`, controller.signal); if (!disposed) { setBatch(value); setPollError(""); failures = 0; } }
+      try { const value = await fetchApiProgress(`/api/detail-batches/${batchId}`, controller.signal); if (!disposed) { if ((value.contentProfile === "ozon") !== ozon && !translation) { disposed = true; setBatchId(undefined); throw new Error("此批次属于其他创建模式，请从对应入口打开。"); } setBatch(value); setPollError(""); failures = 0; } }
       catch (error) { if (!disposed) { setPollError(requestErrorMessage(error)); failures++; if (error instanceof ApiRequestError && error.status === 404) disposed = true; } }
       finally { if (!disposed) timer = setTimeout(poll, Math.min(30000, 2500 * 2 ** Math.min(failures, 4))); }
     }
@@ -79,7 +82,7 @@ export function BatchDetailWorkspace({ translation = false }: { translation?: bo
       }
       const result = groupProductFiles(files, translation ? 30 : 8);
       if (!result.groups.length) throw new Error("文件夹中没有 PNG、JPEG 或 WebP 图片。");
-      setGroups(result.groups); setIgnored(result.ignored); upload.current = { id: "", projects: [] }; setPrepared(false);
+      setGroups(result.groups.map(group => ({ ...group, product: ozonProductSchema.parse({}) }))); setIgnored(result.ignored); upload.current = { id: "", projects: [] }; setPrepared(false);
     } catch (error) { toast.error(error instanceof Error ? error.message : "文件夹读取失败"); }
   }
   async function start() {
@@ -102,7 +105,7 @@ export function BatchDetailWorkspace({ translation = false }: { translation?: bo
         setStage(`准备商品 ${index + 1}/${groups.length}：${group.name}`);
         let saved = upload.current.projects[index];
         if (!saved) {
-          const p = await post("/api/projects", { name: group.name.slice(0, 80).padEnd(2, "商品"), platform, style: "generic_clean", description });
+          const p = await post("/api/projects", { name: (group.product?.title || group.name).slice(0, 80).padEnd(2, "商品"), platform, style: "generic_clean", description: ozon ? "" : description, ...(ozon ? { ozonProduct: group.product } : {}) });
           saved = { id: p.id, uploaded: 0, styleUploaded: 0 }; upload.current.projects[index] = saved;
         }
         if (translation) {
@@ -117,7 +120,7 @@ export function BatchDetailWorkspace({ translation = false }: { translation?: bo
             await post(`/api/projects/${saved.id}/assets/upload`, { type: "REFERENCE", purpose: "style_reference", ...await fileToBase64Payload(styleFiles[i]) });
             saved.styleUploaded = i + 1;
           }
-          await data(await fetch(`/api/projects/${saved.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ modelSnapshot: { creativePreferences: { version: 2, userDirection: direction } } }) }));
+          await data(await fetch(`/api/projects/${saved.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ modelSnapshot: { creativePreferences: { version: 2, userDirection: direction }, ...(ozon ? { creationConfigured: true, previewConfig: { heroImageCount: heroCount, detailSectionCount: detailCount, contentLanguage: language, imageAspectRatio: "3:4", quality } } : {}) } }) }));
         }
       }
       setStage(translation ? "启动批量翻译…" : "检查模型配置并启动批量任务…");
@@ -140,7 +143,7 @@ export function BatchDetailWorkspace({ translation = false }: { translation?: bo
     try { localStorage.removeItem(storageKey); } catch {}
   }
   return <section className="mx-auto max-w-4xl space-y-7 py-6">
-    <header><p className="text-sm text-muted-foreground">MxPage · {translation ? "详情页翻译" : "批量详情页"}</p><h1 className="mt-3 text-3xl font-semibold">{translation ? "一套详情页，面向多种语言" : "一整个文件夹，逐套完成"}</h1><p className="mt-4 text-muted-foreground">{translation ? "上传已有详情图，选择多个目标语言。每种语言独立保存，完成即可预览和下载。" : "每张独立商品图，或每个商品子文件夹，生成一套详情页。完成一套，立即展示一套。"}</p></header>
+    <header><p className="text-sm text-muted-foreground">MxPage · {translation ? "详情页翻译" : ozon ? "Ozon 批量详情页" : "批量详情页"}</p><h1 className="mt-3 text-3xl font-semibold">{translation ? "一套详情页，面向多种语言" : ozon ? "逐件确认商品资料，批量生成 Ozon 图片" : "一整个文件夹，逐套完成"}</h1><p className="mt-4 text-muted-foreground">{translation ? "上传已有详情图，选择多个目标语言。每种语言独立保存，完成即可预览和下载。" : "每张独立商品图，或每个商品子文件夹，生成一套详情页。完成一套，立即展示一套。"}</p></header>
     {!batch && <>
       <fieldset disabled={busy || prepared} className="space-y-6 disabled:opacity-70">
         {translation && <div className="flex flex-wrap gap-2" role="group" aria-label="翻译上传模式">{(["single", "multiple", "folder"] as const).map(mode => <Button key={mode} type="button" variant={uploadMode === mode ? "default" : "outline"} aria-pressed={uploadMode === mode} onClick={() => { setUploadMode(mode); setGroups([]); }}>{mode === "single" ? "单张翻译" : mode === "multiple" ? "多张翻译" : "文件夹批量"}</Button>)}</div>}
@@ -149,14 +152,15 @@ export function BatchDetailWorkspace({ translation = false }: { translation?: bo
         {translation && <fieldset className="space-y-3"><legend className="mb-3 text-sm font-medium">目标语言（可多选）</legend><div className="flex flex-wrap gap-2">{contentLanguageOptions.map(l => <label key={l} className="flex cursor-pointer items-center gap-2 rounded-xl border bg-card px-3 py-2 text-sm"><input type="checkbox" checked={languages.includes(l)} onChange={e => setLanguages(e.target.checked ? [...languages,l] : languages.filter(v=>v!==l))}/>{contentLanguageLabels[l]}</label>)}</div></fieldset>}
         {!!groups.length && <div className="space-y-3"><p className="text-sm font-medium">识别到 {groups.length} 套，共 {groups.reduce((n,g)=>n+g.files.length,0)} 张图片{ignored > 0 ? `，已忽略 ${ignored} 个非图片文件` : ""}</p><p className="text-xs text-muted-foreground">{translation ? "图片按文件名自然排序，每个目标语言保留相同顺序。" : "按文件名自然排序，第一张作为主图。"}</p><div className="grid max-h-80 grid-cols-2 gap-3 overflow-auto sm:grid-cols-3">{groups.map((group,i) => <div key={group.key} className="relative flex items-center gap-3 rounded-xl border bg-card p-3"><img src={previews[i]} alt="" className="h-12 w-12 rounded-lg object-contain"/><div className="min-w-0"><p className="truncate pr-3 text-sm">{group.name}</p><p className="text-xs text-muted-foreground">{group.files.length} 张素材</p></div><button type="button" aria-label={`移除商品 ${group.name}`} className="absolute right-1 top-1 p-1" onClick={() => setGroups(groups.filter((_,j)=>j!==i))}><X size={12}/></button></div>)}</div></div>}
         <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
-          {!translation && <label className="space-y-2 text-sm">发布平台<Select value={platform} onValueChange={setPlatform}>{platformOptions.map(p=><option key={p} value={p}>{platformLabels[p]}</option>)}</Select></label>}
+          {!translation && <label className="space-y-2 text-sm">发布平台<Select value={platform} onValueChange={setPlatform}>{(ozon ? ["ozon"] as const : platformOptions.filter(value => value !== "ozon")).map(p=><option key={p} value={p}>{platformLabels[p]}</option>)}</Select></label>}
           {!translation && <label className="space-y-2 text-sm">图片语言<Select value={language} onValueChange={setLanguage}>{contentLanguageOptions.map(l=><option key={l} value={l}>{contentLanguageLabels[l]}</option>)}</Select></label>}
           <label className="space-y-2 text-sm">图像画质<ImageQualitySelect value={quality} onChange={setQuality} models={imageModels}/><ImageCapabilitySummary models={imageModels}/></label>
-          {!translation && <label className="space-y-2 text-sm">每商品头图<Select value={heroCount} onValueChange={v=>setHeroCount(Number(v))}>{heroCountOptions.map(n=><option key={n}>{n}</option>)}</Select></label>}
-          {!translation && <label className="space-y-2 text-sm">每商品详情图<Select value={detailCount} onValueChange={v=>setDetailCount(Number(v))}>{detailCountOptions.map(n=><option key={n}>{n}</option>)}</Select></label>}
+          {!translation && <label className="space-y-2 text-sm">{ozon ? "每商品卡图片张数" : "每商品头图"}<Select value={heroCount} onValueChange={v=>setHeroCount(Number(v))}>{heroCountOptions.map(n=><option key={n}>{n}</option>)}</Select></label>}
+          {!translation && <label className="space-y-2 text-sm">{ozon ? "每商品富文本详情图张数" : "每商品详情图"}<Select value={detailCount} onValueChange={v=>setDetailCount(Number(v))}>{detailCountOptions.map(n=><option key={n}>{n}</option>)}</Select></label>}
         </div>
-        <label className="block space-y-2 text-sm">{translation ? "翻译要求或专有名词（可选）" : "整批商品补充信息（可选）"}<Textarea value={description} onChange={e=>setDescription(e.target.value)} maxLength={4000} placeholder={translation ? "例如品牌名称保留原文、特定词语的翻译。" : "例如商品用途、已确认规格或目标人群。"}/></label>
-        {!translation && <><label className="block space-y-2 text-sm">整批自定义视觉要求（可选）<Textarea value={direction} onChange={e=>setDirection(e.target.value)} maxLength={1200} placeholder="留空时，按每件商品选择摄影、配色和构图。"/></label><StyleReferencePicker files={styleFiles} onChange={setStyleFiles} disabled={busy || prepared} batch/></>}
+        {!ozon && <label className="block space-y-2 text-sm">{translation ? "翻译要求或专有名词（可选）" : "整批商品补充信息（可选）"}<Textarea value={description} onChange={e=>setDescription(e.target.value)} maxLength={4000} placeholder={translation ? "例如品牌名称保留原文、特定词语的翻译。" : "例如商品用途、已确认规格或目标人群。"}/></label>}
+        {!translation && <><label className="block space-y-2 text-sm">整批自定义视觉要求（可选）<Textarea value={direction} onChange={e=>setDirection(e.target.value)} maxLength={1200} placeholder="留空时，按每件商品选择摄影、配色和构图。"/></label>{!ozon && <StyleReferencePicker files={styleFiles} onChange={setStyleFiles} disabled={busy || prepared} batch/>}</>}
+        {ozon && groups.length > 0 && <div className="space-y-5" aria-label="逐商品资料">{groups.map((group, index) => <article key={group.key} className="space-y-4 rounded-2xl border p-4"><div className="flex items-center gap-3"><img src={previews[index]} alt={group.name} className="h-16 w-16 rounded-lg bg-muted object-contain"/><h2 className="min-w-0 break-words font-medium">{group.name}</h2></div><OzonProductFields value={group.product || ozonProductSchema.parse({})} onChange={product => setGroups(previous => previous.map(item => item.key === group.key ? { ...item, product } : item))}/></article>)}<p className="text-xs text-muted-foreground">商品卡与富文本详情图均为3:4，每件商品独立规划；在各作品中确认提示词后开始出图。</p></div>}
       </fieldset>
       {!translation && !hasOutputImages(heroCount, detailCount) && <p role="alert" className="text-sm text-destructive">{OUTPUT_COUNT_ERROR}</p>}
       <Button className="h-12 w-full" disabled={busy || !groups.length || (translation ? !languages.length : !hasOutputImages(heroCount, detailCount))} onClick={start}>{busy && <Loader2 className="mr-2 h-4 w-4 animate-spin"/>}{busy ? stage : translation ? `开始翻译 · ${languages.length} 种语言 / ${groups.reduce((n,g)=>n+g.files.length,0)*languages.length} 张` : `开始批量生成 · ${groups.length} 套 / ${groups.length*(heroCount+detailCount)} 张`}</Button>

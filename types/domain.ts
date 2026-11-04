@@ -3,6 +3,7 @@ export const platformOptions = [
   "taobao_tmall",
   "pinduoduo",
   "xiaohongshu",
+  "ozon",
   "douyin_ecommerce",
 ] as const;
 
@@ -19,6 +20,7 @@ export const platformLabels: Record<(typeof platformOptions)[number], string> = 
   taobao_tmall: "淘宝 / 天猫",
   pinduoduo: "拼多多",
   xiaohongshu: "小红书",
+  ozon: "Ozon",
   douyin_ecommerce: "抖音电商",
 };
 

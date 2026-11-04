@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import type { PromptReview } from "@/lib/detail-runs/prompt-review";
+import { ozonImageRoleLabels } from "@/lib/ozon/contract";
 
 export function PromptReviewPanel({ review, busy, onSubmit }: {
   review: PromptReview;
@@ -45,7 +46,7 @@ export function PromptReviewPanel({ review, busy, onSubmit }: {
   return <section aria-label="生成前提示词确认" className="space-y-5 rounded-2xl border bg-card p-5 sm:p-6">
     <div><h2 className="text-lg font-semibold">生成前，统一确认提示词</h2><p className="mt-2 text-sm leading-6 text-muted-foreground">所有图片的完整提示词都在本页，可直接修改构图、背景和画面文字。统一确认后才会开始生成。</p></div>
     <div className="space-y-4">{pages.map((page, index) => <div key={page.sectionId} className="space-y-3 rounded-xl border p-4">
-      <div><p className="text-xs text-muted-foreground">第 {index + 1} 张 · {page.kind === "HERO" ? "主图" : "详情图"}</p><h3 className="mt-1 font-medium">{page.title}</h3></div>
+      <div><p className="text-xs text-muted-foreground">第 {index + 1} 张 · {page.imageRole ? ozonImageRoleLabels[page.imageRole] : page.kind === "HERO" ? "主图" : "详情图"}</p><h3 className="mt-1 font-medium">{page.title}</h3></div>
       <label className="block space-y-2 text-sm"><span>第 {index + 1} 页完整提示词</span><Textarea value={page.prompt} rows={8} maxLength={30000} disabled={busy} onChange={event => { const prompt = event.target.value; setPages(current => current.map(item => item.sectionId === page.sectionId ? { ...item, prompt } : item)); setSaved(false); confirmation.current = undefined; }} className="min-h-48 leading-6"/></label>
     </div>)}</div>
     <p className="text-xs leading-5 text-muted-foreground">如需修改图片上的文字，请同时更新提示词中的 Exact copy（画面文字）部分，避免出现互相冲突的要求。</p>

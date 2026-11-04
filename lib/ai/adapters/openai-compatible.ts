@@ -3,6 +3,7 @@ import { getRequestProviderCredentials } from "@/lib/services/provider-runtime";
 import { textEndpoint, normalizeOpenAiBaseUrl, type TextSettings } from "@/lib/ai/text-protocol";
 import { resolveImageModel, resolveImageProtocol, type ImageSettings } from "@/lib/ai/image-protocol";
 import { generateEvoLinkImage } from "./evolink-image";
+import { hasContentRefusal, contentRefusalError } from "@/lib/ai/content-refusal";
 import { z } from "zod";
 
 import type {
@@ -280,6 +281,7 @@ function extractImageResult(payload: {
 }
 
 function extractGoogleImageResult(payload: any): ImageGenerationResult {
+  if (hasContentRefusal(payload)) throw contentRefusalError();
   const parts = payload?.candidates?.[0]?.content?.parts ?? [];
 
   for (const part of parts) {

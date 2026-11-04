@@ -164,6 +164,8 @@ export async function buildImageArchive(projectId: string) {
     const output = fs.createWriteStream(tempZipPath);
     archive.pipe(output);
 
+    const heroDir = project.platform === "ozon" ? "00-商品卡图片" : EXPORT_HERO_DIR;
+    const detailDir = project.platform === "ozon" ? "01-富文本详情图" : EXPORT_DETAIL_DIR;
     const galleryAssets = buildGalleryAssets(project);
     const detailAssets = buildDetailAssets(project);
 
@@ -172,14 +174,14 @@ export async function buildImageArchive(projectId: string) {
         const buffer = await readStorageFile(item.asset.filePath);
         const ext = path.extname(item.asset.fileName) || `.${extFromMime(item.asset.mimeType)}`;
         archive.append(buffer, {
-          name: `${EXPORT_HERO_DIR}/${buildExportImageFileName(exportTimestamp, index, ext)}`,
+          name: `${heroDir}/${buildExportImageFileName(exportTimestamp, index, ext)}`,
         });
       }),
       ...detailAssets.map(async (item, index) => {
         const buffer = await readStorageFile(item.asset.filePath);
         const ext = path.extname(item.asset.fileName) || `.${extFromMime(item.asset.mimeType)}`;
         archive.append(buffer, {
-          name: `${EXPORT_DETAIL_DIR}/${buildExportImageFileName(exportTimestamp, index, ext)}`,
+          name: `${detailDir}/${buildExportImageFileName(exportTimestamp, index, ext)}`,
         });
       }),
     ]);
@@ -187,6 +189,7 @@ export async function buildImageArchive(projectId: string) {
     const manifest = {
       projectId: project.id,
       projectName: project.name,
+      platform: project.platform,
       exportedAt: new Date().toISOString(),
       exportTimestamp,
       heroImageCount: galleryAssets.length,
@@ -196,14 +199,15 @@ export async function buildImageArchive(projectId: string) {
       gallery: galleryAssets.map((item, index) => ({
         order: index + 1,
         title: item.title,
-        sourceLabel: item.sourceLabel,
+        sourceLabel: project.platform === "ozon" ? ("section" in item ? "富文本详情图" : index === 0 ? "商品卡主图" : "商品卡附图") : item.sourceLabel,
+        ...(project.platform === "ozon" ? { ozon: (item.asset.metadata as Record<string, unknown> | null)?.ozon } : {}),
         fileName: buildExportImageFileName(
           exportTimestamp,
           index,
           path.extname(item.asset.fileName) || `.${extFromMime(item.asset.mimeType)}`,
         ),
         originalFileName: item.asset.fileName,
-        zipPath: `${EXPORT_HERO_DIR}/${buildExportImageFileName(
+        zipPath: `${heroDir}/${buildExportImageFileName(
           exportTimestamp,
           index,
           path.extname(item.asset.fileName) || `.${extFromMime(item.asset.mimeType)}`,
@@ -215,14 +219,15 @@ export async function buildImageArchive(projectId: string) {
         sectionKey: item.section.sectionKey,
         title: item.section.title,
         sectionType: item.section.type,
-        sourceLabel: item.sourceLabel,
+        sourceLabel: project.platform === "ozon" ? ("section" in item ? "富文本详情图" : index === 0 ? "商品卡主图" : "商品卡附图") : item.sourceLabel,
+        ...(project.platform === "ozon" ? { ozon: (item.asset.metadata as Record<string, unknown> | null)?.ozon } : {}),
         fileName: buildExportImageFileName(
           exportTimestamp,
           index,
           path.extname(item.asset.fileName) || `.${extFromMime(item.asset.mimeType)}`,
         ),
         originalFileName: item.asset.fileName,
-        zipPath: `${EXPORT_DETAIL_DIR}/${buildExportImageFileName(
+        zipPath: `${detailDir}/${buildExportImageFileName(
           exportTimestamp,
           index,
           path.extname(item.asset.fileName) || `.${extFromMime(item.asset.mimeType)}`,

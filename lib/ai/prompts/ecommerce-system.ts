@@ -1,4 +1,5 @@
 import type { PlatformOption } from "@/types/domain";
+import { ozonGroundingRules, ozonDirectionRules } from "@/lib/ozon/rules";
 
 export type CommerceScene =
   | "hero_search"
@@ -43,6 +44,7 @@ type PlatformProfile = {
 };
 
 const platformProfiles: Record<PlatformOption, PlatformProfile> = {
+  ozon: { label: "Ozon 商品图片", framing: "独立3:4商品卡主附图和富文本详情图", copy: "按用户语言呈现有据卖点，默认俄语", cta: "不编造促销与承诺", guardrails: ozonGroundingRules },
   general_ecommerce: {
     label: "通用电商详情页",
     framing: "移动端优先，首屏快速识别商品，详情页按购买决策顺序展开",
@@ -104,6 +106,7 @@ export function inferCommerceScenes(sectionType: string, title = "", goal = ""):
 }
 
 export function buildCommerceSystemPrompt(platform: string, scenes: CommerceScene[] = ["hero_search"]): string {
+  if (platform === "ozon") return ozonDirectionRules;
   const profile = platformProfiles[platform as PlatformOption] ?? platformProfiles.general_ecommerce;
   const sceneText = scenes.map(scene => sceneProfiles[scene]).join("\n");
   return [

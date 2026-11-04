@@ -45,7 +45,7 @@ after(async () => {
 
 test("categories are disjoint, translation takes precedence over platform, and system records are excluded", async () => {
   const all = await listProjectHistory({}, db);
-  assert.deepEqual(all.counts, { all: 39, detail: 13, xiaohongshu: 13, translation: 13 });
+  assert.deepEqual(all.counts, { all: 39, detail: 13, xiaohongshu: 13, ozon: 0, translation: 13 });
   for (const category of ["detail", "xiaohongshu", "translation"] as const) {
     const first = await listProjectHistory({ category }, db);
     const second = await listProjectHistory({ category, page: "2" }, db);
@@ -110,4 +110,18 @@ test("query parsing, category reset links and bounded page navigation", () => {
   assert.deepEqual(historyPageNumbers(1, 1), [1]);
   assert.deepEqual(historyPageNumbers(2, 4), [1, 2, 3, 4]);
   assert.deepEqual(historyPageNumbers(8, 20), [1, "ellipsis", 7, 8, 9, "ellipsis", 20]);
+});
+
+test("Ozon is distinct from detail history and translated Ozon still belongs to translation", async () => {
+  await db.project.createMany({ data: [
+    { id: "ozon-history", name: "Ozon", platform: "ozon", style: "generic_clean" },
+    { id: "ozon-translated-history", name: "Ozon translation", platform: "ozon", style: "generic_clean", modelSnapshot: { translationReady: true } },
+  ] });
+  const ozon = await listProjectHistory({ category: "ozon" }, db);
+  assert.equal(ozon.total, 1);
+  assert.equal(ozon.projects[0].id, "ozon-history");
+  assert.equal(ozon.projects[0].category, "ozon");
+  const translated = await listProjectHistory({ category: "translation" }, db);
+  assert.equal(translated.total, 14);
+  assert.equal(translated.counts.detail, 12);
 });

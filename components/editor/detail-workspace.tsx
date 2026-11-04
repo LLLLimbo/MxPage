@@ -1,4 +1,8 @@
 "use client";
+import { OzonSourceDetails } from "@/components/ozon/source-details";
+import { useWorkspaceNavigation } from "@/components/layout/workspace-navigation";
+import { canReconcilePlanCounts } from "@/lib/detail-runs/plan-counts";
+import { ozonImageRoleLabels } from "@/lib/ozon/contract";
 import { createClientId } from "@/lib/utils/client-id";
 
 import { Select } from "@/components/ui/select";
@@ -38,6 +42,9 @@ const post = (url: string, data: unknown) => fetch(url, { method: "POST", header
 
 export function DetailWorkspace({ initialProject, pageMode = "preview" }: { initialProject: any; pageMode?: "preview" | "prompts" }) {
   const router = useRouter();
+  const isOzon = initialProject.platform === "ozon";
+  useWorkspaceNavigation(isOzon ? "/ozon" : null);
+  const [ozonSupplemental, setOzonSupplemental] = useState("");
   const [project, setProject] = useState(initialProject);
   const [run, setRun] = useState<Run | null>(null);
   const [loaded, setLoaded] = useState(false);
@@ -47,8 +54,8 @@ export function DetailWorkspace({ initialProject, pageMode = "preview" }: { init
   const [missing, setMissing] = useState(false);
   const [selected, setSelected] = useState<string>(initialProject.sections[0]?.id || "");
   const [heroIndex, setHeroIndex] = useState(0);
-  const [view, setView] = useState<"phone" | "images">("phone");
-  const [skin, setSkin] = useState<"taobao" | "generic">(initialProject.platform === "xiaohongshu" ? "generic" : "taobao");
+  const [view, setView] = useState<"phone" | "images">(isOzon ? "images" : "phone");
+  const [skin, setSkin] = useState<"taobao" | "generic">(initialProject.platform === "xiaohongshu" || isOzon ? "generic" : "taobao");
   const [listing, setListing] = useState<ListingPreview>(initialProject.modelSnapshot?.listingPreview || {});
   const [expanded, setExpanded] = useState<string | null>(null);
   const [downloadLink, setDownloadLink] = useState<{ url: string; name: string } | null>(null);
@@ -57,6 +64,7 @@ export function DetailWorkspace({ initialProject, pageMode = "preview" }: { init
   const [language, setLanguage] = useState("en-US");
   const [retryUncertain, setRetryUncertain] = useState(false);
   const [retryArtDirection, setRetryArtDirection] = useState(false);
+  const [retryPlan, setRetryPlan] = useState(false);
   const [inputOpen, setInputOpen] = useState(false);
   const locked = useRef(false);
   const startKey = useRef<string>();
@@ -126,6 +134,8 @@ export function DetailWorkspace({ initialProject, pageMode = "preview" }: { init
     || Object.values(run?.checkpoint.requests || {}).some(request => ["uncertain", "running"].includes(request.state) && !request.resultSource && !(request.upstreamTask && request.upstreamTask.status !== "failed"));
   const reviewAssets = run?.checkpoint.setReviewAssetIds || progress.map(image => image.assetId);
   const failedStoryboard = run?.checkpoint.lastError?.stage === "ART_DIRECTION" && !!run.checkpoint.plan && !generated;
+  const failedPlan = run?.checkpoint.lastError?.code === "PLAN_COUNT_INVALID" && !!run?.checkpoint.plan && !run.checkpoint.artDirection && !run.checkpoint.requests?.ART_DIRECTION && !run.checkpoint.promptReview?.pages.length && !generated;
+  const planNeedsRetry = failedPlan && !(isOzon && run?.checkpoint.lastError?.code === "PLAN_COUNT_INVALID" && canReconcilePlanCounts(run!.checkpoint.plan!.sections, run!.input?.heroCount ?? 0, run!.input?.detailCount ?? 0));
   const v4ReviewAssetsMatch = reviewAssets.length === sections.length && sections.every((s, i) => s.currentImageAssetId && s.currentImageAssetId === reviewAssets[i]);
   const needsPageReview = (run?.checkpoint.workflowVersion === 4 || ((run?.checkpoint.plan as { version?: number } | undefined)?.version || 0) >= 2) && (!run?.checkpoint.setReview || (run?.checkpoint.workflowVersion === 4 && !v4ReviewAssetsMatch));
   const pendingWork = needsPageReview || !progress.length || progress.some(i => !i.assetId || i.state !== "checked" || (run?.checkpoint.workflowVersion !== 4 && i.check?.passed === false && i.correctionCount < 1));
@@ -203,7 +213,7 @@ export function DetailWorkspace({ initialProject, pageMode = "preview" }: { init
       startKey.current = undefined; setInstruction("");
     });
   }
-  const control = (action: string, data: unknown = {}) => act(async () => { await post(`${base}/detail-runs/${run!.id}/${action}`, data); setRetryUncertain(false); setRetryArtDirection(false); });
+  const control = (action: string, data: unknown = {}) => act(async () => { await post(`${base}/detail-runs/${run!.id}/${action}`, data); setRetryUncertain(false); setRetryArtDirection(false); setRetryPlan(false); });
   async function upload(files: FileList | null) {
     if (!files?.length) return;
     await act(async () => {
@@ -234,7 +244,7 @@ export function DetailWorkspace({ initialProject, pageMode = "preview" }: { init
   if (waitingPrompts) return <p role="status" className="text-sm text-muted-foreground">正在进入独立提示词确认页…</p>;
   if (!loaded) return <p role="status" className="text-sm text-muted-foreground">{connectionError || "正在读取任务进度…"}</p>;
   return <div className="space-y-6">
-    <header className="flex flex-wrap items-start justify-between gap-4"><div><Link className="text-sm text-muted-foreground" href="/history">← 我的作品</Link><h1 className="mt-3 text-2xl font-semibold">{project.name}</h1><p className="mt-2 text-sm text-muted-foreground">整套商品图 · 预览、修改与下载</p></div><div className="flex flex-wrap gap-2"><Button variant="outline" disabled={busy || !availableImages} onClick={() => downloadOutput("images")}><Download className="mr-2 h-4 w-4"/>分图 ZIP{availableImages ? `（${availableImages}）` : ""}</Button><Button disabled={!completeDetails || busy || Boolean(active)} onClick={() => downloadOutput("long-image")}>下载详情长图</Button></div></header>
+    <header className="flex flex-wrap items-start justify-between gap-4"><div><Link className="text-sm text-muted-foreground" href="/history">← 我的作品</Link><h1 className="mt-3 text-2xl font-semibold">{project.name}</h1><p className="mt-2 text-sm text-muted-foreground">整套商品图 · 预览、修改与下载</p></div><div className="flex flex-wrap gap-2"><Button variant="outline" disabled={busy || !availableImages} onClick={() => downloadOutput("images")}><Download className="mr-2 h-4 w-4"/>分图 ZIP{availableImages ? `（${availableImages}）` : ""}</Button>{!isOzon && <Button disabled={!completeDetails || busy || Boolean(active)} onClick={() => downloadOutput("long-image")}>下载详情长图</Button>}{isOzon && <Button variant="outline" disabled={busy || Boolean(active)} onClick={() => act(async () => { const copy = await post(`${base}/ozon/clone`, {}); router.push(`/projects/${copy.id}/configure`); })}>再生成一套</Button>}</div></header>
     {downloadLink && <p role="status" className="text-sm text-muted-foreground">文件已准备好。如未自动下载，<a href={downloadLink.url} download={downloadLink.name} className="text-foreground underline underline-offset-4">点击保存 {downloadLink.name}</a>。</p>}
     {showProgress && run && <section aria-label="任务进度" className="space-y-2" aria-live="polite">
       <div className="flex items-center justify-between gap-3 text-sm"><span className="flex items-center gap-2">{run.status === "RUNNING" && <Loader2 className="h-4 w-4 animate-spin"/>}{workflowStageLabels[run.stage] || run.stage}</span><span className="shrink-0 tabular-nums text-muted-foreground">{generated}/{totalImages} 张</span></div>
@@ -243,13 +253,13 @@ export function DetailWorkspace({ initialProject, pageMode = "preview" }: { init
     <div className="grid items-start gap-6 xl:grid-cols-[minmax(0,1fr)_320px]">
       <div className="min-w-0 space-y-6">
         <div className="flex flex-wrap gap-2" role="group" aria-label="预览方式"><Button variant={view === "phone" ? "default" : "outline"} aria-pressed={view === "phone"} onClick={() => setView("phone")}><Smartphone className="mr-2 h-4 w-4"/>手机预览</Button><Button variant={view === "images" ? "default" : "outline"} aria-pressed={view === "images"} onClick={() => setView("images")}><LayoutGrid className="mr-2 h-4 w-4"/>图片列表</Button></div>
-        {view === "phone" ? <><div className="flex items-center gap-3 text-sm"><span className="shrink-0 text-muted-foreground">预览外观</span><Select aria-label="预览外观" value={skin} onValueChange={v => setSkin(v as "taobao" | "generic")}><option value="taobao">淘宝 · 参考界面</option><option value="generic">通用 · 纯图片预览</option></Select></div><ProductPhonePreview skin={skin} listing={listing} name={project.name} platform={platformLabels[project.platform as keyof typeof platformLabels] || "通用电商"} sections={sections} progress={displayProgress} selected={selected} onSelect={setSelected} onExpand={openImage}/></> : <>
-        {heroes.length > 0 && <section className="rounded-2xl border p-4"><div className="mb-3 flex items-center justify-between"><h2 className="font-medium">商品头图</h2><div className="flex items-center gap-2"><Button size="sm" variant="ghost" aria-label="上一张头图" onClick={() => setHeroIndex((heroIndex + heroes.length - 1) % heroes.length)}><ChevronLeft size={18}/></Button><span className="text-sm">{heroIndex % heroes.length + 1}/{heroes.length}</span><Button size="sm" variant="ghost" aria-label="下一张头图" onClick={() => setHeroIndex((heroIndex + 1) % heroes.length)}><ChevronRight size={18}/></Button></div></div><ImageCard section={heroes[heroIndex % heroes.length]} progress={displayProgress} selected={selected} onSelect={setSelected}/></section>}
-        {details.length > 0 && <section className="rounded-2xl border p-4"><h2 className="mb-4 font-medium">商品详情</h2><div className="mx-auto max-w-xl space-y-1">{details.map(s => <ImageCard key={s.id} section={s} progress={displayProgress} selected={selected} onSelect={setSelected}/>)}</div></section>}
+        {view === "phone" ? <><div className="flex items-center gap-3 text-sm"><span className="shrink-0 text-muted-foreground">预览外观</span><Select aria-label="预览外观" value={skin} onValueChange={v => setSkin(v as "taobao" | "generic")}>{!isOzon && <option value="taobao">淘宝 · 参考界面</option>}<option value="generic">通用 · 纯图片预览</option></Select></div><ProductPhonePreview skin={skin} listing={listing} name={project.name} platform={platformLabels[project.platform as keyof typeof platformLabels] || "通用电商"} sections={sections} progress={displayProgress} selected={selected} onSelect={setSelected} onExpand={openImage}/></> : <>
+        {heroes.length > 0 && <section className="rounded-2xl border p-4"><div className="mb-3 flex items-center justify-between"><h2 className="font-medium">{isOzon ? "商品卡主图与附图" : "商品头图"}</h2><div className="flex items-center gap-2"><Button size="sm" variant="ghost" aria-label="上一张头图" onClick={() => setHeroIndex((heroIndex + heroes.length - 1) % heroes.length)}><ChevronLeft size={18}/></Button><span className="text-sm">{heroIndex % heroes.length + 1}/{heroes.length}</span><Button size="sm" variant="ghost" aria-label="下一张头图" onClick={() => setHeroIndex((heroIndex + 1) % heroes.length)}><ChevronRight size={18}/></Button></div></div><ImageCard section={heroes[heroIndex % heroes.length]} progress={displayProgress} selected={selected} onSelect={setSelected}/></section>}
+        {details.length > 0 && <section className="rounded-2xl border p-4"><h2 className="mb-4 font-medium">{isOzon ? "富文本详情图" : "商品详情"}</h2><div className="mx-auto max-w-xl space-y-1">{details.map(s => <ImageCard key={s.id} section={s} progress={displayProgress} selected={selected} onSelect={setSelected}/>)}</div></section>}
         {!sections.length && <div className="flex min-h-64 items-center justify-center rounded-2xl border border-dashed p-8 text-center text-muted-foreground">{active ? "正在理解商品，生成的图片将逐张出现在这里" : "你的整套商品图会显示在这里"}</div>}
         </>}
-        <CommerceContentCoverage plan={run?.checkpoint.plan || project.modelSnapshot?.commercePlan}/>
-        <CommercePlanSummary value={run?.checkpoint.plan || project.modelSnapshot?.commercePlan} artDirection={run?.checkpoint.artDirection || project.modelSnapshot?.commerceArtDirection} references={run?.checkpoint.styleReferences || project.modelSnapshot?.commerceStyleReferences} adaptations={run?.checkpoint.adaptations || project.modelSnapshot?.commerceAdaptations} sectionIds={sections.map(s => s.id)} onSelect={setSelected}/>
+        {!isOzon && <CommerceContentCoverage plan={run?.checkpoint.plan || project.modelSnapshot?.commercePlan}/>}
+        {!isOzon && <CommercePlanSummary value={run?.checkpoint.plan || project.modelSnapshot?.commercePlan} artDirection={run?.checkpoint.artDirection || project.modelSnapshot?.commerceArtDirection} references={run?.checkpoint.styleReferences || project.modelSnapshot?.commerceStyleReferences} adaptations={run?.checkpoint.adaptations || project.modelSnapshot?.commerceAdaptations} sectionIds={sections.map(s => s.id)} onSelect={setSelected}/>}
         {(run?.checkpoint.plan || run?.checkpoint.agentSummary) && <details className="rounded-2xl border p-5 text-sm"><summary className="cursor-pointer">查看商品理解与设计方案</summary><div className="mt-3 space-y-3 leading-6"><p>{run.checkpoint.plan?.facts.join("；")}</p><p>{run.checkpoint.plan?.style}</p><p>{run.checkpoint.agentSummary}</p></div></details>}
       </div>
       <aside className="min-w-0 space-y-5">
@@ -260,6 +270,7 @@ export function DetailWorkspace({ initialProject, pageMode = "preview" }: { init
         {section?.imageUrl && <button type="button" aria-label="放大当前图片" onClick={() => openImage(section.id)} className="relative block w-full overflow-hidden rounded-xl border bg-muted/20"><img className="h-44 w-full object-contain" src={section.imageUrl} alt={section.title}/>{displayProgress.find(image => image.sectionId === section.id)?.state === "generating" && <ImageGenerationLoading overlay label="正在更新图片"/>}<span className="absolute bottom-2 right-2 rounded-md bg-background/90 p-1.5"><Expand size={16}/></span></button>}
         {selectedReview?.passed === false && <p className="text-sm text-amber-700 dark:text-amber-400">需检查：{selectedReview.issues.join("；") || "请人工核对"}</p>}
         {section?.imageUrl && !selectedReview && <p className="text-xs text-muted-foreground">此版本暂无模型检查记录，请核对原图。</p>}
+        {isOzon && section && <OzonSourceDetails section={section} assets={project.assets}/>}
         <Textarea aria-label="图片修改要求" value={instruction} onChange={e => setInstruction(e.target.value)} placeholder="例如：保留商品，把背景改为暖白色，标题缩短…" rows={4}/>
         {progress.find(i => i.sectionId === selected)?.error && <p className="text-xs text-amber-700 dark:text-amber-400">{progress.find(i => i.sectionId === selected)?.error}</p>}
         <Button className="w-full" disabled={busy || Boolean(active) || !section?.imageUrl || !instruction.trim()} onClick={() => start("edit")}>按要求修改</Button>
@@ -289,10 +300,11 @@ export function DetailWorkspace({ initialProject, pageMode = "preview" }: { init
       {["INTERRUPTED", "PARTIAL", "FAILED", "CANCELED"].includes(run.status) && <div className="space-y-3">
         {pendingUpstream > 0 && <div className="space-y-2"><p className="text-sm text-muted-foreground">{pendingUpstream} 张图片已有任务编号或结果地址，可单独恢复，不重新生图、不调用质量检查模型。</p><Button variant="outline" disabled={busy || run.draining} onClick={() => control("resume", { recoverImagesOnly: true })}>仅恢复已有图片（查询 / 下载）</Button></div>}
         {Object.entries(run.checkpoint.requests || {}).filter(([, request]) => request.state === "uncertain").map(([key, request]) => <p key={key} className="text-sm text-amber-700">{key.startsWith("GENERATE:") ? sections.find(section => key === `GENERATE:${section.id}`)?.title || "图片" : workflowStageLabels[key] || key}：{request.failureCode === "IMAGE_DOWNLOAD_FAILED" || request.resultSource ? "图片下载失败，结果地址已保存。可仅恢复已有图片。" : request.failureCode === "IMAGE_RESULT_QUERY_FAILED" || request.upstreamTask && request.upstreamTask.status !== "failed" ? "结果查询未完成。可仅查询原任务，不重新生图。" : `模型请求未完成。${request.error || "结果暂未确认，请核对调用记录后再决定是否授权重试。"}`}</p>)}
-        {failedStoryboard ? <label className="flex items-start gap-2 text-sm"><input type="checkbox" checked={retryArtDirection} onChange={e => setRetryArtDirection(e.target.checked)}/>仅重新请求失败的视觉分镜，可能再次计费。保留已完成规划，完成后等待确认逐页提示词。</label> : uncertain && <label className="flex items-start gap-2 text-sm"><input type="checkbox" checked={retryUncertain} onChange={e => setRetryUncertain(e.target.checked)}/>重试结果不确定的请求，可能产生额外费用</label>}
-        {reviewOnly ? <p className="text-sm text-amber-700 dark:text-amber-400">图片已生成，检查结果仅作提示。请选中标记为需检查的图片核对或修改；已有图片和完整长图仍可下载。</p> : <Button disabled={busy || run.draining || (failedStoryboard && !retryArtDirection)} onClick={() => control("resume", failedStoryboard ? { retryArtDirection } : { retryUncertain })}>{run.draining ? "等待请求收尾" : failedStoryboard ? "仅重试视觉分镜" : uncertain && !retryUncertain ? "继续其余任务（跳过不确定请求）" : "继续未完成部分"}</Button>}
+        {planNeedsRetry ? <label className="flex items-start gap-2 text-sm"><input type="checkbox" checked={retryPlan} onChange={event => setRetryPlan(event.target.checked)}/>仅重新请求未通过校验的图片规划，可能再次计费。保留商品分析，完成后等待确认提示词。</label> : failedStoryboard ? <label className="flex items-start gap-2 text-sm"><input type="checkbox" checked={retryArtDirection} onChange={e => setRetryArtDirection(e.target.checked)}/>仅重新请求失败的视觉分镜，可能再次计费。保留已完成规划，完成后等待确认逐页提示词。</label> : uncertain && <label className="flex items-start gap-2 text-sm"><input type="checkbox" checked={retryUncertain} onChange={e => setRetryUncertain(e.target.checked)}/>重试结果不确定的请求，可能产生额外费用</label>}
+        {reviewOnly ? <p className="text-sm text-amber-700 dark:text-amber-400">图片已生成，检查结果仅作提示。请选中标记为需检查的图片核对或修改；{isOzon ? "已有独立图片仍可下载。" : "已有图片和完整长图仍可下载。"}</p> : <Button disabled={busy || run.draining || (failedStoryboard && !retryArtDirection) || (planNeedsRetry && !retryPlan)} onClick={() => control("resume", planNeedsRetry ? { retryPlan } : failedStoryboard ? { retryArtDirection } : { retryUncertain })}>{run.draining ? "等待请求收尾" : planNeedsRetry ? "仅重新规划" : failedPlan ? "按请求张数继续（复用规划）" : failedStoryboard ? "仅重试视觉分镜" : uncertain && !retryUncertain ? "继续其余任务（跳过不确定请求）" : "继续未完成部分"}</Button>}
       </div>}
-          {run.status === "WAITING_INPUT" && <SupplementalInfoDialog
+          {run.status === "WAITING_INPUT" && isOzon && <div className="space-y-4"><p className="text-sm">填写实际商品资料，或选择按现有信息继续。缺少的参数不会自动补造。</p>{(run.checkpoint.plan as any)?.missingFields?.map((field: any) => <p key={field.field} className="text-sm text-muted-foreground">{field.question}</p>)}<Textarea aria-label="Ozon 真实补充资料" value={ozonSupplemental} onChange={event => setOzonSupplemental(event.target.value)} maxLength={6000}/><div className="flex gap-3"><Button disabled={busy || !ozonSupplemental.trim()} onClick={() => control("answers", { answer: ozonSupplemental })}>确认资料并继续</Button><Button variant="outline" disabled={busy} onClick={() => control("answers", { skip: true })}>按现有信息继续</Button></div></div>}
+          {run.status === "WAITING_INPUT" && !isOzon && <SupplementalInfoDialog
             key={`${run.id}:${supplementalQuestionSetId(supplementalQuestions)}`}
             open={inputOpen} onOpenChange={setInputOpen} questions={supplementalQuestions} busy={busy}
             questionIssue={run.checkpoint.supplementalQuestionIssue} onPrepareSuggestions={() => control("suggestions")}
@@ -308,6 +320,6 @@ function ImageCard({ section, progress, selected, onSelect }: { section: any; pr
   const review = imageReview(section, progress);
   return <button type="button" onClick={() => onSelect(section.id)} className={`block w-full overflow-hidden rounded-xl border text-left ${selected === section.id ? "ring-2 ring-slate-500" : ""}`}>
     <ProductImage section={section} progress={progress} square={section.type === "HERO"}/>
-    <div className="bg-background p-3 text-sm"><span>{section.title}</span>{review && !review.passed && <p className="mt-1 text-amber-700 dark:text-amber-400">需检查：{review.issues.join("；") || "请人工核对"}</p>}{p?.error && <p className="mt-1 text-amber-700 dark:text-amber-400">{p.error}</p>}</div>
+    <div className="bg-background p-3 text-sm">{section.editableData?.ozon?.imageRole && <p className="mb-1 text-xs text-muted-foreground">{ozonImageRoleLabels[section.editableData.ozon.imageRole as keyof typeof ozonImageRoleLabels]}</p>}<span>{section.title}</span>{review && !review.passed && <p className="mt-1 text-amber-700 dark:text-amber-400">需检查：{review.issues.join("；") || "请人工核对"}</p>}{p?.error && <p className="mt-1 text-amber-700 dark:text-amber-400">{p.error}</p>}</div>
   </button>;
 }

@@ -12,16 +12,19 @@ import { categoryProfiles, categorySchema } from "./merchandising";
 import { isStyleReference } from "@/lib/utils/asset-purpose";
 import { BriefPreparationError } from "./brief-recovery";
 import { requestErrorMessage } from "@/lib/utils/request-error";
+import { ozonAnalysisSchema, readOzonProduct, resolveSaleQuantity, validateOzonAnalysis } from "@/lib/ozon/contract";
+import { ozonAnalysisSignature } from "@/lib/ozon/runtime";
+import { ozonAnalysisRules } from "@/lib/ozon/rules";
 
 export const briefSchema = z.object({ name: z.string().min(2).max(80), description: z.string().max(2000), visualDirection: z.string().max(1200), uncertainties: z.array(z.string().max(300)).max(5) });
 const observationsSchema = z.object({ name: z.string().min(2).max(80), description: z.string().max(2000), category: categorySchema, uncertainties: z.array(z.string().max(300)).max(5) });
 const reviewSchema = observationsSchema.extend({ corrections: z.array(z.string().max(300)).max(8) });
-const storedSchema = briefSchema.extend({ version: z.literal(2).optional(), category: categorySchema.optional(), recommendedVisualDirection: z.string().optional(), recognition: z.object({ modelId: z.string(), imageCount: z.number().int(), detail: z.literal("high"), analyzedAt: z.string(), reviewed: z.boolean().optional(), detailViewCount: z.number().int().optional(), corrections: z.array(z.string()).optional() }).optional() });
+const storedSchema = briefSchema.extend({ version: z.literal(2).optional(), ozonAnalysis: ozonAnalysisSchema.optional(), category: categorySchema.optional(), recommendedVisualDirection: z.string().optional(), recognition: z.object({ modelId: z.string(), imageCount: z.number().int(), detail: z.literal("high"), analyzedAt: z.string(), reviewed: z.boolean().optional(), detailViewCount: z.number().int().optional(), corrections: z.array(z.string()).optional() }).optional() });
 const jobs = (globalThis as typeof globalThis & { v4BriefJobs?: Map<string, Promise<z.infer<typeof storedSchema>>> }).v4BriefJobs ??= new Map();
 const normalizedModelId = (value: string) => value.toLowerCase().replace(/[^a-z0-9.]/g, "");
 type BriefOptions = { force?: boolean; resume?: boolean; initialOnly?: boolean; retryUncertain?: boolean };
 type BriefRequest = { sourceHash: string; requestId: string; stage: "识别" | "复核"; state: "running" | "completed" | "uncertain"; startedAt: number };
-const draftSchema = z.object({ sourceHash: z.string(), modelId: z.string(), observations: observationsSchema, analyzedAt: z.string() });
+const draftSchema = z.object({ sourceHash: z.string(), modelId: z.string(), observations: observationsSchema.extend({ ozonAnalysis: ozonAnalysisSchema.optional() }), analyzedAt: z.string() });
 const json = (value: unknown) => JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
 
 async function saveBriefSnapshot(projectId: string, patch: Record<string, unknown>, owner?: BriefRequest) {
@@ -54,7 +57,8 @@ async function analyze(projectId: string, { force = false, initialOnly = false, 
   const project = await prisma.project.findUniqueOrThrow({ where: { id: projectId }, include: { assets: { where: { type: { in: ["MAIN", "ANGLE", "DETAIL", "REFERENCE"] } }, orderBy: [{ isMain: "desc" }, { sortOrder: "asc" }] } } });
   const assets = project.assets.filter(asset => !isStyleReference(asset));
   const snapshot = (project.modelSnapshot || {}) as Record<string, any>;
-  const sourceHash = createHash("sha256").update(JSON.stringify({ description: project.description, assets: assets.map(asset => [asset.id, asset.filePath]) })).digest("hex");
+  const ozonProduct = project.platform === "ozon" ? readOzonProduct(snapshot) : undefined;
+  const sourceHash = createHash("sha256").update(JSON.stringify({ description: project.description, assets: assets.map(asset => [asset.id, asset.filePath]), ...(ozonProduct ? { ozonProduct } : {}) })).digest("hex");
   const cached = storedSchema.safeParse(snapshot.creationBrief);
   const cachedHash = snapshot.creationBriefSourceHash || snapshot.creationBriefDraft?.sourceHash;
   if (!force && cachedHash === sourceHash && cached.success && (initialOnly || cached.data.recognition?.reviewed)) return cached.data;
@@ -86,12 +90,18 @@ async function analyze(projectId: string, { force = false, initialOnly = false, 
   const parsedDraft = draftSchema.safeParse(snapshot.creationBriefDraft);
   let draft = !force && parsedDraft.success && parsedDraft.data.sourceHash === sourceHash ? parsedDraft.data : undefined;
   if (!draft) {
-    await requestOnce("识别", requestId => invokeStructured({ ...provider, apiKey, baseUrl: provider.baseUrl, model: modelId, schema: observationsSchema, system: "你是商品识别模型。只返回 JSON。只记录图片和用户描述支持的商品事实、品类和不确定字段，不推断隐藏规格、性能或材质。", input: JSON.stringify({ description: project.description, assetIds: assets.map(asset => asset.id) }), images, timeoutMs: 60000, maxAttempts: 1, requestId, monitor: { projectId, operation: "v4_product_prepare" } }), observations => {
+    await requestOnce("识别", requestId => invokeStructured({ ...provider, apiKey, baseUrl: provider.baseUrl, model: modelId, schema: ozonProduct ? observationsSchema.extend({ ozonAnalysis: ozonAnalysisSchema }) : observationsSchema, system: ozonProduct ? ozonAnalysisRules : "你是商品识别模型。只返回 JSON。只记录图片和用户描述支持的商品事实、品类和不确定字段，不推断隐藏规格、性能或材质。", input: JSON.stringify(ozonProduct ? { product: ozonProduct, quantity: resolveSaleQuantity(ozonProduct), assetIds: assets.map(asset => asset.id), anchorAssetId: assets[0]?.id } : { description: project.description, assetIds: assets.map(asset => asset.id) }), images, timeoutMs: 60000, maxAttempts: 1, requestId, monitor: { projectId, operation: "v4_product_prepare" } }), observations => {
       draft = { sourceHash, modelId, observations, analyzedAt: new Date().toISOString() };
       return { creationBriefDraft: draft };
     });
   }
   const observations = draft!.observations;
+  if (ozonProduct) {
+    const ozonAnalysis = validateOzonAnalysis(observations.ozonAnalysis, { product: ozonProduct, quantity: resolveSaleQuantity(ozonProduct), anchorAssetId: assets[0].id, sourceAssetIds: assets.map(asset => asset.id), referenceOverrides: snapshot.ozonReferences || [] });
+    const result = { ...observations, ozonAnalysis, version: 2 as const, visualDirection: "按商品特点安排独立主附图，保持商业摄影质感与清晰信息层级。", recognition: { modelId, imageCount: images.length, detail: "high" as const, analyzedAt: new Date().toISOString(), reviewed: true, detailViewCount: 0, corrections: [] } };
+    await saveBriefSnapshot(projectId, { creationBrief: result, creationBriefSourceHash: sourceHash, ozonAnalysisSignature: ozonAnalysisSignature(ozonProduct, assets.map(asset => asset.id)) });
+    return result;
+  }
   if (initialOnly) {
     const recommendedVisualDirection = categoryProfiles[observations.category].art;
     const result = { ...observations, version: 2 as const, visualDirection: recommendedVisualDirection, recommendedVisualDirection, recognition: { modelId: modelId!, imageCount: images.length, detail: "high" as const, analyzedAt: new Date().toISOString(), reviewed: false, detailViewCount: 0, corrections: [] } };

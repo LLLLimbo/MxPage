@@ -1,0 +1,101 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+
+module.exports = async function checkOzon(browser, baseUrl, db, { png, directory }) {
+  assert.ok(path.isAbsolute(directory));
+  const context = await browser.newContext();
+  try {
+    const page = await context.newPage();
+    page.setDefaultTimeout(30000);
+    const errors = [];
+    page.on('pageerror', error => errors.push(error.message));
+    async function loadFonts() {
+      await page.addStyleTag({ content: '@font-face{font-family:OzonAcceptance;src:url(/fonts/NotoSansSC.ttf) format("truetype");font-display:swap}body{font-family:OzonAcceptance,sans-serif}' });
+      await page.evaluate(() => document.fonts.ready);
+    }
+    await page.route('**/api/files/mock/**', route => route.fulfill({ contentType: 'image/png', body: png }));
+    await page.goto(`${baseUrl}/ozon`);
+    await page.getByRole('heading', { name: '为 Ozon 商品，生成俄语主附图与详情图' }).waitFor();
+    const desktopLinks = await page.getByRole('navigation', { name: '主导航', exact: true }).getByRole('link').allTextContents();
+    assert.equal(desktopLinks.indexOf('Ozon 一键详情页'), desktopLinks.indexOf('小红书图文') + 1);
+    assert.equal(await page.getByRole('navigation', { name: '主导航', exact: true }).getByRole('link', { name: 'Ozon 一键详情页' }).getAttribute('aria-current'), 'page');
+    await page.getByLabel('售卖数量（可选）', { exact: true }).fill('2 双');
+    await page.getByText('本次售卖数量：2 双', { exact: false }).waitFor();
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.getByRole('navigation', { name: '移动端主导航' }).getByRole('link', { name: 'Ozon 一键详情页' }).waitFor({ state: 'visible' });
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    await loadFonts();
+    await page.screenshot({ path: 'test-output/browser-regression/ozon-mobile.png', fullPage: true });
+    await page.setViewportSize({ width: 1440, height: 1050 });
+    await page.getByRole('switch', { name: '批量生成' }).click();
+    await page.getByRole('heading', { name: '逐件确认商品资料，批量生成 Ozon 图片' }).waitFor();
+    const folder = path.join(directory, 'ozon-browser-input');
+    for (const name of ['item-a', 'item-b']) {
+      fs.mkdirSync(path.join(folder, name), { recursive: true });
+      fs.writeFileSync(path.join(folder, name, 'main.png'), png);
+    }
+    await page.getByLabel('选择待处理图片').setInputFiles(folder);
+    const inputs = page.locator('[aria-label="逐商品资料"]');
+    await inputs.getByLabel('原始商品标题（可选）').nth(0).fill('Первый товар 8 pcs');
+    await inputs.getByLabel('原始商品标题（可选）').nth(1).fill('Второй товар');
+    await inputs.getByLabel('售卖数量（可选）').nth(1).fill('3 套');
+    const labels = page.locator('label:visible');
+    assert.equal(await labels.filter({ hasText: /^每商品卡图片张数/ }).getByRole('combobox').textContent(), '5');
+    assert.equal(await labels.filter({ hasText: /^每商品富文本详情图张数/ }).getByRole('combobox').textContent(), '0');
+    assert.equal(await labels.filter({ hasText: /^图片语言/ }).getByRole('combobox').textContent(), 'Русский');
+    assert.equal(await inputs.getByText('本次售卖数量：8 pcs', { exact: false }).count(), 1);
+    assert.equal(await inputs.getByText('本次售卖数量：3 套', { exact: false }).count(), 1);
+    await page.screenshot({ path: 'test-output/browser-regression/ozon-batch.png', fullPage: true });
+
+    const project = await db.project.create({ data: { name: 'Ozon 配置验收', platform: 'ozon', style: 'generic_clean', modelSnapshot: { ozonProduct: { title: '44 шт.', attributes: '100% cotton', saleQuantity: '2 双' }, creationBrief: { name: '棕色商品组合', description: 'Brown product', visualDirection: '', uncertainties: [] }, previewConfig: { heroImageCount: 5, detailSectionCount: 0, contentLanguage: 'ru-RU', imageAspectRatio: '3:4' } } } });
+    const main = await db.productAsset.create({ data: { projectId: project.id, type: 'MAIN', isMain: true, filePath: `mock/${project.id}.png`, fileName: 'main.png', sortOrder: 0 } });
+    const spec = await db.productAsset.create({ data: { projectId: project.id, type: 'ANGLE', filePath: `mock/${project.id}-spec.png`, fileName: 'spec.png', sortOrder: 1 } });
+    const saved = await db.project.findUniqueOrThrow({ where: { id: project.id } });
+    await db.project.update({ where: { id: project.id }, data: { modelSnapshot: { ...saved.modelSnapshot, ozonReferences: [{ assetId: main.id, role: 'same_product', reason: '', variantConfirmed: false }, { assetId: spec.id, role: 'evidence', reason: 'Parameter evidence only', variantConfirmed: false }] } } });
+    await page.goto(`${baseUrl}/projects/${project.id}/configure`);
+    await page.getByRole('button', { name: '确认并生成 5 张图片' }).waitFor();
+    assert.equal(await page.getByLabel('售卖数量（可选）', { exact: true }).inputValue(), '2 双');
+    assert.equal(await page.getByRole('combobox', { name: '参考图 1 用途' }).isDisabled(), true);
+    await page.getByRole('combobox', { name: '参考图 2 用途' }).getByText('文字参数证据', { exact: true }).waitFor();
+    assert.equal(await page.getByRole('combobox', { name: '参考图 2 用途' }).textContent(), '文字参数证据');
+    assert.equal(await page.getByText('输出比例：3:4 竖版（商品卡与详情图）').count(), 1);
+    assert.equal(await page.getByRole('combobox', { name: 'GPT Image 尺寸' }).count(), 0);
+    await loadFonts();
+    assert.equal(await page.getByRole('navigation', { name: '主导航', exact: true }).getByRole('link', { name: 'Ozon 一键详情页' }).getAttribute('aria-current'), 'page');
+    await page.screenshot({ path: 'test-output/browser-regression/ozon-configure.png', fullPage: true });
+    const sections = (details, badFact = false) => Array.from({ length: 6 + details }, (_, index) => ({ kind: index < 6 ? 'HERO' : 'DETAIL', title: `Image ${index}`, objective: 'Product information', buyerQuestion: 'What is it?', copy: `Known product ${index}`, evidence: [], factIds: badFact && index === 0 ? ['missing-fact'] : [], referenceAssetIds: [], variantOverview: false }));
+    const checkpoint = (details, badFact = false) => ({ workflowVersion: 4, stage: 'PLAN', plan: { productName: 'Product', category: 'Home', facts: [], contentCoverage: [], requirements: [], missingFields: [], sections: sections(details, badFact) }, ozon: { analysis: { facts: [] } }, images: [], imageReviews: {}, answers: [], attempts: {}, timings: {}, requests: { PLAN: { state: 'completed', requestId: 'saved-planning-request' } }, promptReview: { revision: 0, pages: [] }, lastError: { stage: 'PLAN', code: 'WORKFLOW_FAILED', message: 'DETAIL 数量必须为 6', retryable: false } });
+    const failed = await db.detailRun.create({ data: { projectId: project.id, idempotencyKey: 'ozon-count-browser', status: 'FAILED', stage: 'PLAN', error: 'DETAIL 数量必须为 6', input: { workflowVersion: 4, contentProfile: 'ozon', mode: 'create', heroCount: 6, detailCount: 6 }, checkpoint: checkpoint(7) } });
+    const controls = [];
+    await page.route(`**/api/projects/${project.id}/detail-runs/${failed.id}/resume`, route => { controls.push(route.request().postDataJSON()); return route.fulfill({ contentType: 'application/json', body: JSON.stringify({ success: true, data: { id: failed.id } }) }); });
+    await page.goto(`${baseUrl}/projects/${project.id}/editor`);
+    await page.getByText('富文本详情图要求 6 张，规划实际返回 7 张。尚未开始生图，已保存规划草稿。', { exact: true }).waitFor();
+    await page.getByRole('button', { name: '按请求张数继续（复用规划）' }).click();
+    assert.equal(controls.length, 1);
+    assert.notEqual(controls[0].retryPlan, true);
+    await loadFonts();
+    await page.screenshot({ path: 'test-output/browser-regression/ozon-count-recovery.png', fullPage: true });
+    await db.detailRun.update({ where: { id: failed.id }, data: { checkpoint: checkpoint(5) } });
+    await page.reload();
+    await page.getByRole('button', { name: '仅重新规划' }).waitFor();
+    assert.equal(await page.getByRole('button', { name: '仅重新规划' }).isDisabled(), true);
+    await page.getByRole('checkbox', { name: /仅重新请求未通过校验的图片规划/ }).check();
+    await page.getByRole('button', { name: '仅重新规划' }).click();
+    assert.equal(controls.length, 2);
+    assert.equal(controls[1].retryPlan, true);
+    const sourceError = checkpoint(6, true);
+    sourceError.lastError = { stage: 'PLAN', code: 'OZON_PLAN_INVALID', message: 'Ozon 规划的事实与来源不一致，未发起生图。', retryable: false };
+    await db.detailRun.update({ where: { id: failed.id }, data: { checkpoint: sourceError, error: sourceError.lastError.message } });
+    await page.reload();
+    await page.getByText('已保存的规划可以继续，无需重新规划。请在生成前确认全部提示词。', { exact: true }).waitFor();
+    assert.equal(await page.getByRole('button', { name: '仅重新规划' }).count(), 0);
+    assert.equal(await page.getByRole('checkbox', { name: /仅重新请求未通过校验的图片规划/ }).count(), 0);
+    await page.getByRole('button', { name: '继续未完成部分', exact: true }).click();
+    assert.equal(controls.length, 3);
+    assert.notEqual(controls[2].retryPlan, true);
+    await page.screenshot({ path: 'test-output/browser-regression/ozon-source-recovery.png', fullPage: true });
+    assert.deepEqual(errors, []);
+    console.log('PASS: Ozon navigation, mobile layout, per-product batch inputs, Russian/5+0 defaults, reference roles, fixed ratio, count recovery and source-warning recovery without paid replanning');
+  } finally { await context.close(); }
+};

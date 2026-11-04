@@ -1,8 +1,8 @@
-export const historyCategories = ["all", "detail", "xiaohongshu", "translation"] as const;
+export const historyCategories = ["all", "detail", "xiaohongshu", "ozon", "translation"] as const;
 export type HistoryCategory = (typeof historyCategories)[number];
 export type WorkCategory = Exclude<HistoryCategory, "all">;
 export const historyCategoryLabels: Record<HistoryCategory, string> = {
-  all: "全部", detail: "详情页", xiaohongshu: "小红书", translation: "翻译",
+  all: "全部", detail: "详情页", xiaohongshu: "小红书", ozon: "Ozon", translation: "翻译",
 };
 export const HISTORY_PAGE_SIZE = 12;
 

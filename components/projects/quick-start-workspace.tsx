@@ -9,10 +9,13 @@ import { Button } from "@/components/ui/button";
 import { fileToBase64Payload } from "@/lib/utils/base64-upload";
 import { validateUploadFiles } from "@/lib/storage/upload-limits";
 import { ApiRequestError, readApiResponse as payload, requestErrorMessage } from "@/lib/utils/request-error";
+import { OzonProductFields } from "@/components/ozon/product-fields";
+import { ozonProductSchema } from "@/lib/ozon/contract";
 
-export function QuickStartWorkspace() {
+export function QuickStartWorkspace({ ozon = false }: { ozon?: boolean }) {
   const router = useRouter();
   const [files, setFiles] = useState<File[]>([]);
+  const [ozonProduct, setOzonProduct] = useState(() => ozonProductSchema.parse({}));
   const [previews, setPreviews] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [stage, setStage] = useState("");
@@ -91,7 +94,7 @@ export function QuickStartWorkspace() {
     pending.current = true; setBusy(true);
     try {
       setStage("创建商品项目…");
-      const project = projectId ? { id: projectId } : await payload(await fetch("/api/projects", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: files[0].name.replace(/\.[^.]+$/, "").slice(0, 80).padEnd(2, "商品"), platform: "general_ecommerce", style: "generic_clean", description: "" }) }));
+      const project = projectId ? { id: projectId } : await payload(await fetch("/api/projects", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: (ozonProduct.title || files[0].name.replace(/\.[^.]+$/, "")).slice(0, 80).padEnd(2, "商品"), platform: ozon ? "ozon" : "general_ecommerce", style: "generic_clean", description: "", ...(ozon ? { ozonProduct } : {}) }) }));
       setProjectId(project.id);
       for (let index = uploaded.current; index < files.length; index++) {
         const file = files[index];
@@ -115,11 +118,12 @@ export function QuickStartWorkspace() {
     finally { pending.current = false; setBusy(false); setStage(""); setRetryUncertain(false); }
   }
   return <div className="mx-auto max-w-4xl space-y-8 py-6">
-    <div><p className="text-sm text-muted-foreground">MxPage · 一键详情页</p><h1 className="mt-3 text-3xl font-semibold tracking-tight md:text-4xl">上传商品，交给 AI 完成整套详情页</h1><p className="mt-4 leading-7 text-muted-foreground">自动理解商品、设计整套风格、生成并检查图片。完成后直接修改和下载。</p></div>
+    <div><p className="text-sm text-muted-foreground">MxPage · {ozon ? "Ozon 一键详情页" : "一键详情页"}</p><h1 className="mt-3 text-3xl font-semibold tracking-tight md:text-4xl">{ozon ? "为 Ozon 商品，生成俄语主附图与详情图" : "上传商品，交给 AI 完成整套详情页"}</h1><p className="mt-4 leading-7 text-muted-foreground">{ozon ? "保持商品一致，按需呈现卖点、细节和场景。每张独立生成，统一采用 3:4 竖版。" : "自动理解商品、设计整套风格、生成并检查图片。完成后直接修改和下载。"}</p></div>
     <fieldset disabled={busy || Boolean(projectId)} className="space-y-6 disabled:opacity-70">
+      {ozon && <OzonProductFields value={ozonProduct} onChange={setOzonProduct}/>}
 
       {!files.length && <div {...dropHandlers} className={`mx-auto flex aspect-square w-full max-w-md flex-col items-center justify-center gap-3 rounded-3xl border-2 border-dashed p-4 text-center transition-colors focus-within:border-foreground/50 sm:p-6 ${dragging ? "border-foreground bg-muted ring-4 ring-foreground/10" : "border-input bg-background"}`}>
-        <UploadCloud className="h-8 w-8 text-muted-foreground"/><span className="font-medium" role="status">{dragging ? "松开鼠标，添加商品图片" : "将商品图片拖到此方框，或点击选择"}</span><span className="text-sm text-muted-foreground">最多 8 张，每张不超过 20MB；第一张作为主图</span>
+        <UploadCloud className="h-8 w-8 text-muted-foreground"/><span className="font-medium" role="status">{dragging ? "松开鼠标，添加商品图片" : "将商品图片拖到此方框，或点击选择"}</span><span className="text-sm text-muted-foreground">{ozon ? "最多 8 张，每张不超过 20MB；第一张确定商品身份" : "最多 8 张，每张不超过 20MB；第一张作为主图"}</span>
         <Button type="button" variant="outline" className="mt-1 gap-2 px-5" onClick={() => fileInput.current?.click()}><UploadCloud className="h-4 w-4"/>{files.length ? "继续添加图片" : "选择商品图片"}</Button>
         {files.length > 0 && <span className="text-xs text-muted-foreground" role="status">已选择 {files.length} / 8 张图片</span>}
 

@@ -9,6 +9,7 @@ import sharp from "sharp";
 import type { V4Checkpoint } from "../lib/detail-runs/service-v4";
 import { buildSupplementalSubmission, normalizeSupplementalQuestions } from "../lib/detail-runs/supplemental-input";
 import { assertStrictResponseSchema } from "./helpers/strict-response-schema";
+import { ozonProductSchema } from "../lib/ozon/contract";
 
 let directory: string;
 let db: typeof import("../lib/db/prisma").prisma;
@@ -19,7 +20,7 @@ let leases: typeof import("../lib/detail-runs/run-lease");
 let png: Buffer;
 const credentials = { apiKey: "isolated-v4-test-key", baseUrl: "https://workflow.test/v1" };
 const originalFetch = globalThis.fetch;
-type Call = { kind: "PLAN" | "PLAN_CONTENT_REPAIR" | "INPUT_SUGGESTIONS" | "ART_DIRECTION" | "GENERATE" | "IMAGE_REVIEW" | "SET_REVIEW"; input: any; index?: number; body: any; url: string; signal?: AbortSignal | null };
+type Call = { kind: "OZON_ANALYSIS" | "OZON_BRIEF" | "PLAN" | "PLAN_CONTENT_REPAIR" | "INPUT_SUGGESTIONS" | "ART_DIRECTION" | "GENERATE" | "IMAGE_REVIEW" | "SET_REVIEW"; input: any; index?: number; body: any; url: string; signal?: AbortSignal | null };
 let calls: Call[] = [];
 let respond: (call: Call) => Promise<Response>;
 let inFlight = 0, peak = 0;
@@ -54,11 +55,11 @@ function deferred() {
 function plan(heroes = 3, details = 4) {
   return { productName: "Tea cup", category: "Home", facts: ["Brown cup"], requirements: [], missingFields: [],
     contentCoverage: ["need", "selling_points", "scenarios", "details", "specifications", "trust", "usage", "closing"].map(module => ({ module, status: "covered", sectionIndexes: [details ? heroes : 0], reason: "Confirmed copy" })),
-    sections: Array.from({ length: heroes + details }, (_, index) => ({ kind: index < heroes ? "HERO" : "DETAIL", title: `Section ${index}`, objective: "Show original product faithfully", buyerQuestion: "What is it?", copy: `Original copy ${index}`, evidence: ["user_description"] })),
+    sections: Array.from({ length: heroes + details }, (_, index) => ({ kind: index < heroes ? "HERO" as const : "DETAIL" as const, title: `Section ${index}`, objective: "Show original product faithfully", buyerQuestion: "What is it?", copy: `Original copy ${index}`, evidence: ["user_description"] })),
   };
 }
 function art(p = plan()) {
-  return { concept: "Warm natural light with detailed product identity", palette: ["#FFFFFF", "#CCCCCC"], typography: "Clear readable typography", sections: p.sections.map((section, sectionIndex) => ({ sectionIndex, expression: "photo", prompt: `Image-${sectionIndex} clear product view and accurate original text`, textBlocks: [{ text: section.copy, role: "body", x: 5, y: 5, width: 90, fontSize: 24, lineHeight: 1.2, align: "left" }] })) };
+  return { concept: "Warm natural light with detailed product identity", palette: ["#FFFFFF", "#CCCCCC"], typography: "Clear readable typography", sections: p.sections.map((section, sectionIndex) => ({ sectionIndex, expression: "photo" as const, prompt: `Image-${sectionIndex} clear product view and accurate original text`, textBlocks: [{ text: section.copy, role: "body", x: 5, y: 5, width: 90, fontSize: 24, lineHeight: 1.2, align: "left" }] })) };
 }
 function completion(value: unknown) {
   return Response.json({ id: "mock", object: "chat.completion", created: 1, model: "gpt-6-luna", choices: [{ index: 0, message: { role: "assistant", content: JSON.stringify(value) }, finish_reason: "stop" }], usage: { prompt_tokens: 20, completion_tokens: 10, total_tokens: 30 } });
@@ -166,7 +167,7 @@ before(async () => {
       assert.ok(["gpt-6-luna", "text-B", "vision-B"].includes(body.model)); assert.equal(body.tools, undefined); assert.equal(body.response_format.type, "json_schema");
       assertStrictResponseSchema(body.response_format.json_schema.schema);
       const system = body.messages[0].content;
-      const kind = system.includes("商品补充候选模型") ? "INPUT_SUGGESTIONS" : system.includes("内容安排修复模型") ? "PLAN_CONTENT_REPAIR" : /商品规划模型|小红书图文规划模型/.test(system) ? "PLAN" : /视觉分镜模型|XHS VISUAL DIRECTOR/.test(system) ? "ART_DIRECTION" : system.includes("整套页面检查模型") ? "SET_REVIEW" : "IMAGE_REVIEW";
+      const kind = system.includes("Ozon 素材分析模型") ? "OZON_ANALYSIS" : system.includes("Ozon 商品识别模型") ? "OZON_BRIEF" : system.includes("商品补充候选模型") ? "INPUT_SUGGESTIONS" : system.includes("内容安排修复模型") ? "PLAN_CONTENT_REPAIR" : /商品规划模型|小红书图文规划模型/.test(system) ? "PLAN" : /视觉分镜模型|XHS VISUAL DIRECTOR/.test(system) ? "ART_DIRECTION" : system.includes("整套页面检查模型") ? "SET_REVIEW" : "IMAGE_REVIEW";
       call = { kind, input: JSON.parse(body.messages[1].content[0].text), body, url: String(url) };
     }
     call.signal = init?.signal;
@@ -1402,4 +1403,588 @@ test("existing workflow retains A and chat after settings change; new workflow u
   } finally {
     await saveProviderDefaults(provider.id, { planningModelId: "gpt-6-luna", analysisModelId: "gpt-6-luna", heroImageModelId: "gpt-image-2.5-flare", detailImageModelId: "gpt-image-2.5-flare", imageEditModelId: "gpt-image-2.5-flare", textProtocol: "chat_completions" });
   }
+});
+
+function ozonAnalysis(assetIds: string[]) {
+  return { identity: "Brown cotton product set", references: assetIds.map((assetId, index) => ({ assetId, role: ["same_product", "detail", "evidence", "variant"][index] || "excluded", reason: "Source-specific evidence", variantConfirmed: false })), facts: [
+    { id: "identity", claim: "Brown product set", kind: "appearance", sourceId: assetIds[0] },
+    ...(assetIds[2] ? [{ id: "material", claim: "100% cotton", kind: "material", sourceId: assetIds[2] }] : []),
+    { id: "ocr_quantity", claim: "44 pcs", kind: "quantity", sourceId: assetIds[0] },
+    ...(assetIds[3] ? [{ id: "other_color", claim: "Blue product", kind: "appearance", sourceId: assetIds[3] }] : []),
+  ] };
+}
+async function ozonSuccess(call: Call): Promise<Response> {
+  if (call.kind === "OZON_ANALYSIS") return completion(ozonAnalysis(call.input.assetIds));
+  if (call.kind === "OZON_BRIEF") return completion({ name: "棕色商品组合", description: "棕色商品组合", category: "home", uncertainties: [], ozonAnalysis: ozonAnalysis(call.input.assetIds) });
+  if (call.kind === "PLAN") {
+    const context = call.input.ozon;
+    const p = plan(call.input.requestedHeroCount, call.input.requestedDetailCount);
+    return completion({ ...p, contentCoverage: [], sections: p.sections.map(({ evidence: _evidence, ...section }, index) => ({ ...section, copy: `Описание товара ${index}`, factIds: context.analysis.facts.map((fact: any) => fact.id), referenceAssetIds: context.analysis.references.filter((row: any) => row.role === "detail").map((row: any) => row.assetId), variantOverview: false })) });
+  }
+  if (call.kind === "GENERATE") return Response.json({ data: [{ b64_json: (await sharp({ create: { width: 48, height: 64, channels: 3, background: "#c4ad89" } }).png().toBuffer()).toString("base64") }] });
+  return success(call);
+}
+async function ozonProject(product: Record<string, string> = {}, sourceCount = 4) {
+  const row = await db.project.create({ data: { name: "Platform-generated blue title 99 pcs", platform: "ozon", style: "generic_clean", modelSnapshot: { ozonProduct: ozonProductSchema.parse(product), previewConfig: { heroImageCount: 5, detailSectionCount: 0, contentLanguage: "ru-RU", imageAspectRatio: "3:4", quality: "low" } } } });
+  for (let index = 0; index < sourceCount; index++) await storage.saveUploadAsset({ projectId: row.id, type: index ? "ANGLE" : "MAIN", isMain: !index, fileName: `44-pcs-source-${index}.png`, fileBuffer: png, mimeType: "image/png", sortOrder: index });
+  return row.id;
+}
+async function startOzon(projectId: string, counts: { heroCount?: number; detailCount?: number } = {}) {
+  return runtime.runWithProviderCredentials(credentials, () => service.createV4DetailRun(projectId, { idempotencyKey: randomUUID(), quality: "low", ...counts }, credentials));
+}
+
+test("Ozon defaults freeze original facts, exclude image quantities and require exact prompt approval", async () => {
+  respond = ozonSuccess;
+  const projectId = await ozonProject();
+  const created = await startOzon(projectId);
+  let run = await settled(created!.id, false);
+  assert.equal(run.status, "WAITING_PROMPTS", JSON.stringify(cpOf(run).lastError));
+  const input = run.input as any, cp = cpOf(run);
+  assert.deepEqual([input.heroCount, input.detailCount, input.language], [5, 0, "ru-RU"]);
+  assert.equal(cp.ozon!.quantity, null);
+  assert.equal(cp.ozon!.version, 5);
+  assert.match(input.ozon.rules.planning, /Ozon 商品规划模型/);
+  assert.match(input.ozon.rules.planning, /主图（catalog_main）默认为电商销售海报/);
+  assert.match(input.ozon.rules.direction, /仅第一张商品卡主图（catalog_main）默认采用电商销售海报设计/);
+  assert.equal(cp.ozon!.rules!.planning, input.ozon.rules.planning);
+  assert.deepEqual(cp.ozon!.analysis!.facts.map(fact => fact.id), ["identity", "material"]);
+  assert.deepEqual(cp.promptReview!.pages.map(page => page.imageRole), ["catalog_main", "catalog_aux", "catalog_aux", "catalog_aux", "catalog_aux"]);
+  assert.equal(cp.promptReview!.pages.filter(page => page.prompt.includes("commercial e-commerce sales poster")).length, 1);
+  assert.ok(cp.promptReview!.pages[0].prompt.includes("commercial e-commerce sales poster"));
+  assert.equal(count("GENERATE"), 0);
+  const edited = cp.promptReview!.pages.map((page, index) => index ? `${page.prompt}\nApproved custom composition` : "Image-0 User selected a quiet product photograph instead of the default poster.\nExact copy:\nПользовательский заголовок");
+  const approval = await approve(run, edited);
+  run = await settled(run.id, false);
+  assert.equal(run.status, "COMPLETED", JSON.stringify(cpOf(run).lastError));
+  const imageCalls = calls.filter(call => call.kind === "GENERATE");
+  assert.equal(imageCalls.length, 5);
+  for (const call of imageCalls) {
+    assert.ok(call.body instanceof FormData);
+    assert.equal(call.body.get("size"), "1152x1536");
+    assert.equal(call.body.getAll("image[]").length, 2, "Only identity and the chosen detail crop may be pixels");
+    assert.equal(call.body.get("prompt"), edited[call.index!]);
+    assert.ok(!String(call.body.get("prompt")).includes("commercial e-commerce sales poster"), "The approved user prompt takes precedence over the default hero poster direction");
+  }
+  const assets = await db.productAsset.findMany({ where: { projectId, type: "GENERATED" } });
+  assert.equal(assets.length, 5);
+  assert.ok(assets.every(asset => (asset.metadata as any).ozon.delivery.ratioValid));
+  await runtime.runWithProviderCredentials(credentials, () => service.controlV4DetailRun(projectId, run.id, "confirm-prompts", approval, credentials));
+  await resume(projectId, run.id);
+  assert.equal(count("GENERATE"), 5);
+});
+
+for (const [heroCount, detailCount] of [[1, 0], [0, 1], [3, 4]]) test(`Ozon ${heroCount}+${detailCount} independently delivers the requested roles`, async () => {
+  respond = ozonSuccess;
+  const projectId = await ozonProject({ title: "44 шт.", attributes: "数量：8", saleQuantity: "2 套" });
+  const created = await startOzon(projectId, { heroCount, detailCount });
+  const run = await settled(created!.id);
+  assert.equal(run.status, "COMPLETED", JSON.stringify(cpOf(run).lastError));
+  assert.equal(cpOf(run).ozon!.quantity?.text, "2 套");
+  assert.equal(count("GENERATE"), heroCount + detailCount);
+  assert.equal(cpOf(run).plan!.contentCoverage.length, 0);
+  assert.equal(cpOf(run).promptReview!.pages.filter(page => page.imageRole === "rich_detail").length, detailCount);
+  for (const call of calls.filter(call => call.kind === "GENERATE")) {
+    const prompt = String(call.body.get("prompt"));
+    assert.equal(prompt.split("SHARED VISUAL STYLE").length - 1, 1);
+    assert.ok(prompt.includes(cpOf(run).artDirection!.concept));
+    assert.ok(prompt.includes(cpOf(run).artDirection!.palette.join(", ")));
+    assert.ok(prompt.includes(cpOf(run).artDirection!.typography));
+    assert.equal(prompt.includes("commercial e-commerce sales poster"), heroCount > 0 && call.index === 0);
+    assert.equal(prompt.split("Exact copy:\n")[1], cpOf(run).artDirection!.sections[call.index!].textBlocks.map(block => block.text).join("\n"));
+  }
+});
+
+test("Ozon snowman catalog and rich-content prompts keep short final copy and shared style through approval and recovery", async () => {
+  const finalCopy = [["Новогодний снеговик", "Клетчатый наряд"], ["Детали образа", "Красный шарф"], ["Праздничный уголок"]];
+  const style = { concept: "Warm festive product photography", palette: ["winter cream", "pine green", "scarf red"], typography: "Readable Cyrillic, short headlines and quiet supporting labels" };
+  respond = async call => {
+    if (call.kind === "ART_DIRECTION") return completion({ ...art(call.input.plan), ...style, sections: art(call.input.plan).sections.map((section, index) => ({ ...section, prompt: `Image-${index} Snowman scene ${index}, tactile fabric, soft light and clear product silhouette.`, textBlocks: finalCopy[index].map((text, block) => ({ text, role: block ? "label" : "headline" })) })) });
+    const response = await ozonSuccess(call);
+    if (call.kind !== "PLAN") return response;
+    const body = await response.json(), p = JSON.parse(body.choices[0].message.content);
+    p.productName = "Новогодний снеговик";
+    for (const section of p.sections) section.copy = "Новогодний снеговик в клетчатой шапке и одежде, с красным шарфом. Праздничное оформление дома. Композиция: снеговик целиком на чистом светлом фоне с зимними акцентами; товар крупно, без посторонних предметов и надписей, которые закрывают фигурку.";
+    return completion(p);
+  };
+  const projectId = await ozonProject();
+  let run = await settled((await startOzon(projectId, { heroCount: 2, detailCount: 1 }))!.id, false);
+  assert.equal(run.status, "WAITING_PROMPTS", JSON.stringify(cpOf(run).lastError));
+  assert.equal(cpOf(run).ozon!.version, 5);
+  assert.equal((run.input as any).ozon.rules.planning, cpOf(run).ozon!.rules!.planning);
+  assert.deepEqual(cpOf(run).artDirection!.sections.map(section => section.textBlocks.map(block => block.text)), finalCopy);
+  assert.ok(!cpOf(run).contentWarnings?.some(warning => /自动补齐|正文/.test(warning)));
+  const planned = cpOf(run).promptReview!.pages.map(page => page.prompt);
+  for (const [index, prompt] of planned.entries()) {
+    assert.equal(prompt.split("Exact copy:\n")[1], finalCopy[index].join("\n"));
+    assert.equal(prompt.split("SHARED VISUAL STYLE").length - 1, 1);
+    assert.ok(prompt.includes(style.concept));
+    assert.ok(prompt.includes(style.palette.join(", ")));
+    assert.ok(prompt.includes(style.typography));
+    assert.ok(!prompt.includes("Композиция:"));
+    for (const other of [0, 1, 2].filter(value => value !== index)) assert.ok(!prompt.includes(finalCopy[other][0]));
+  }
+  const saved = planned.map((prompt, index) => index ? prompt : prompt.replace("Exact copy:\nНовогодний снеговик", "Exact copy:\nСнеговик для праздника"));
+  const review = cpOf(run).promptReview!, beforeSave = calls.length;
+  await service.controlV4DetailRun(projectId, run.id, "save-prompts", { revision: review.revision, pages: review.pages.map((page, index) => ({ sectionId: page.sectionId, prompt: saved[index] })) }, {});
+  assert.equal(calls.length, beforeSave);
+  await service.controlV4DetailRun(projectId, run.id, "cancel", {}, credentials);
+  await service.controlV4DetailRun(projectId, run.id, "resume", {}, credentials);
+  run = await settled(run.id, false);
+  assert.deepEqual(cpOf(run).promptReview!.pages.map(page => page.prompt), saved);
+  assert.equal(count("GENERATE"), 0);
+  const approval = await approve(run);
+  run = await settled(run.id, false);
+  assert.equal(run.status, "COMPLETED", JSON.stringify(cpOf(run).lastError));
+  for (const call of calls.filter(call => call.kind === "GENERATE")) assert.equal(call.body.get("prompt"), saved[call.index!]);
+  for (const call of calls.filter(call => call.kind === "IMAGE_REVIEW")) {
+    assert.ok(saved.includes(call.input.approvedPrompt));
+    assert.equal(call.input.plan, undefined);
+    assert.match(call.body.messages[0].content, /不比较候选正文长度/);
+  }
+  const setReview = calls.find(call => call.kind === "SET_REVIEW")!;
+  assert.deepEqual(setReview.input.approvedPrompts.map((page: any) => page.prompt), saved);
+  assert.equal(setReview.input.plan, undefined);
+  assert.match(setReview.body.messages[0].content, /不按候选正文长度/);
+  await service.controlV4DetailRun(projectId, run.id, "confirm-prompts", approval, credentials);
+  assert.equal(count("OZON_ANALYSIS"), 1);
+  assert.equal(count("PLAN"), 1);
+  assert.equal(count("ART_DIRECTION"), 1);
+  assert.equal(count("GENERATE"), 3);
+  assert.equal(count("IMAGE_REVIEW"), 3);
+  assert.equal(count("SET_REVIEW"), 1);
+  assert.equal(count("PLAN_CONTENT_REPAIR"), 0);
+});
+
+for (const hasDimensions of [true, false]) test(`Ozon icon posters keep hat labels, sourced specifications and ${hasDimensions ? "known dimensions" : "missing optional dimensions"} out of generic headlines`, async () => {
+  const heroCount = hasDimensions ? 2 : 0, detailCount = 2;
+  const hat = { title: "Праздничная деталь", labels: ["Веточки", "Ягоды"], factIds: ["hat"], objective: "Show the hat decoration with local evidence", direction: "Hat detail crop with leaf and berry icons and short leader labels." };
+  const material = { title: "Материал", labels: ["100% хлопок"], factIds: ["material"], objective: "Present the confirmed material", direction: "Product view with a fabric icon and a concise specification card." };
+  const themes = hasDimensions ? [
+    { title: "Новогодний снеговик", labels: ["Новогодний снеговик"], factIds: ["identity"], objective: "Present the product offer", direction: "Product-led sales poster with an expressive short title." },
+    hat, material,
+    { title: "Размер", labels: ["Высота", "62 см"], factIds: ["height"], objective: "Show the confirmed overall height", direction: "Complete figure with a vertical height arrow beside the whole product." },
+  ] : [hat, material];
+  respond = async call => {
+    if (call.kind === "OZON_ANALYSIS") {
+      const raw = ozonAnalysis(call.input.assetIds);
+      return completion({ ...raw, identity: "Plaid Christmas snowman figure", facts: [
+        { id: "identity", claim: "Snowman figure with plaid hat", sourceId: call.input.assetIds[0], kind: "appearance" },
+        { id: "hat", claim: "Hat decoration has branches and berries", sourceId: call.input.assetIds[1], kind: "appearance" },
+        { id: "material", claim: "100% cotton", sourceId: "input:attributes", kind: "material" },
+        ...(hasDimensions ? [{ id: "height", claim: "Overall height 62 cm", sourceId: "input:attributes", kind: "specification" }] : []),
+      ] });
+    }
+    if (call.kind === "PLAN") {
+      const p = plan(heroCount, detailCount);
+      return completion({ ...p, productName: "Новогодний снеговик", facts: call.input.ozon.analysis.facts.map((fact: any) => fact.claim), contentCoverage: [], sections: p.sections.map(({ evidence: _evidence, ...section }, index) => ({ ...section, title: themes[index].title, objective: themes[index].objective, copy: themes[index].labels.join("\n"), factIds: themes[index].factIds, referenceAssetIds: themes[index] === hat ? [call.input.ozon.sourceAssetIds[1]] : [], variantOverview: false })) });
+    }
+    if (call.kind === "ART_DIRECTION") return completion({ ...art(call.input.plan), concept: "Warm Christmas product evidence with clear graphic information", palette: ["cream", "pine green", "berry red"], typography: "Cyrillic family: expressive hero title, small labels and clear data on other images", sections: art(call.input.plan).sections.map((section, index) => ({ ...section, expression: heroCount && index === 0 ? "photo" : "information", prompt: `Image-${index} ${themes[index].direction}`, textBlocks: themes[index].labels.map(text => ({ text, role: heroCount && index === 0 ? "headline" : "label" })) })) });
+    return ozonSuccess(call);
+  };
+  const projectId = await ozonProject({ attributes: hasDimensions ? "Материал: 100% cotton; Высота: 62 cm" : "Материал: 100% cotton" });
+  let run = await settled((await startOzon(projectId, { heroCount, detailCount }))!.id, false);
+  assert.equal(run.status, "WAITING_PROMPTS", JSON.stringify(cpOf(run).lastError));
+  assert.equal(cpOf(run).ozon!.version, 5);
+  assert.equal(cpOf(run).ozon!.quantity, null);
+  assert.match(cpOf(run).ozon!.rules!.planning, /不默认生成“节日细节”“精致设计”/);
+  assert.match(cpOf(run).ozon!.rules!.direction, /不要求全套使用大标题/);
+  assert.match(cpOf(run).ozon!.rules!.direction, /不逐项复述参考图中可直接确认的颜色、纹理及部件位置/);
+  const pages = cpOf(run).promptReview!.pages;
+  for (const [index, page] of pages.entries()) {
+    assert.equal(page.prompt.split("Exact copy:\n")[1], themes[index].labels.join("\n"));
+    assert.ok(page.prompt.includes(themes[index].direction));
+    assert.ok(!page.prompt.includes("Праздничная деталь"), "Internal image titles are not automatically rendered");
+    assert.equal(page.prompt.includes("icon infographic poster"), !(heroCount && index === 0));
+    assert.equal(page.prompt.split("SHARED VISUAL STYLE").length - 1, 1);
+    assert.ok(!page.prompt.split("Exact copy:\n")[1].includes("icons"));
+    if (!hasDimensions) assert.ok(!page.prompt.includes("62 см"));
+  }
+  assert.ok(!cpOf(run).contentWarnings?.some(warning => warning.includes("自动补齐")));
+  await service.controlV4DetailRun(projectId, run.id, "cancel", {}, credentials);
+  await service.controlV4DetailRun(projectId, run.id, "resume", {}, credentials);
+  run = await settled(run.id, false);
+  assert.deepEqual(cpOf(run).promptReview!.pages, pages);
+  assert.equal(count("GENERATE"), 0);
+  await approve(run);
+  run = await settled(run.id, false);
+  assert.equal(run.status, "COMPLETED", JSON.stringify(cpOf(run).lastError));
+  for (const call of calls.filter(call => call.kind === "GENERATE")) {
+    assert.equal(call.body.get("prompt"), pages[call.index!].prompt);
+    assert.equal(call.body.getAll("image[]").length + call.body.getAll("image").length, themes[call.index!] === hat ? 2 : 1);
+  }
+  const sections = await db.pageSection.findMany({ where: { projectId }, orderBy: { order: "asc" } });
+  for (const [index, section] of sections.entries()) {
+    const metadata = (section.editableData as any).ozon;
+    assert.deepEqual(metadata.factIds, themes[index].factIds);
+    assert.ok(metadata.facts.every((fact: any) => fact.sourceId === "input:attributes" || cpOf(run).ozon!.sourceAssetIds.includes(fact.sourceId)));
+  }
+  for (const call of calls.filter(call => ["IMAGE_REVIEW", "SET_REVIEW"].includes(call.kind))) {
+    assert.equal(call.input.plan, undefined);
+    assert.match(call.body.messages[0].content, /附图和详情图允许没有描述性标题/);
+    assert.match(call.body.messages[0].content, /图标含义、标注对象、数字单位和可读性/);
+  }
+  assert.equal(count("OZON_ANALYSIS"), 1);
+  assert.equal(count("PLAN"), 1);
+  assert.equal(count("ART_DIRECTION"), 1);
+  assert.equal(count("GENERATE"), themes.length);
+  assert.equal(count("INPUT_SUGGESTIONS"), 0);
+  assert.equal(count("PLAN_CONTENT_REPAIR"), 0);
+  if (hasDimensions) {
+    const imageService = await import("../lib/services/generation-service");
+    const hatIndex = themes.indexOf(hat), hatSection = sections[hatIndex];
+    await runtime.runWithProviderCredentials(credentials, () => imageService.regenerateSectionImage(projectId, hatSection.id));
+    assert.equal(calls.filter(call => call.kind === "GENERATE").at(-1)!.body.get("prompt"), pages[hatIndex].prompt);
+    await runtime.runWithProviderCredentials(credentials, () => imageService.editSectionImage(projectId, hatSection.id, { instruction: "Move the leaf icon beside its callout" }));
+    const edited = String(calls.filter(call => call.kind === "GENERATE").at(-1)!.body.get("prompt"));
+    assert.ok(edited.includes(pages[hatIndex].prompt));
+    assert.equal(edited.split("SHARED VISUAL STYLE").length - 1, 1);
+    assert.equal(edited.split("Exact copy:\n")[1], hat.labels.join("\n"));
+    assert.equal(count("PLAN"), 1);
+    assert.equal(count("ART_DIRECTION"), 1);
+  }
+});
+
+for (const [heroCount, detailCount] of [[1, 0], [0, 1]]) test(`Ozon explicitly text-free ${heroCount}+${detailCount} output never restores planned copy`, async () => {
+  respond = async call => call.kind === "ART_DIRECTION"
+    ? completion({ ...art(call.input.plan), sections: art(call.input.plan).sections.map(section => ({ ...section, prompt: `Image-${section.sectionIndex} Product-only photo with no added overlay text.`, textBlocks: [] })) })
+    : ozonSuccess(call);
+  const projectId = await ozonProject();
+  const created = await runtime.runWithProviderCredentials(credentials, () => service.createV4DetailRun(projectId, { idempotencyKey: randomUUID(), heroCount, detailCount, quality: "low", instruction: "无字图，不添加标题或标签" }, credentials));
+  let run = await settled(created!.id, false);
+  assert.equal(run.status, "WAITING_PROMPTS", JSON.stringify(cpOf(run).lastError));
+  assert.deepEqual(cpOf(run).artDirection!.sections[0].textBlocks, []);
+  const prompt = cpOf(run).promptReview!.pages[0].prompt;
+  assert.match(prompt, /No new overlay text/);
+  assert.equal(prompt.split("Exact copy:\n")[1], "");
+  assert.equal(prompt.includes("commercial e-commerce sales poster"), heroCount > 0);
+  assert.ok(!prompt.includes("Описание товара"));
+  assert.equal(count("GENERATE"), 0);
+  await approve(run);
+  run = await settled(run.id, false);
+  assert.equal(run.status, "COMPLETED", JSON.stringify(cpOf(run).lastError));
+  assert.equal(calls.find(call => call.kind === "GENERATE")!.body.get("prompt"), prompt);
+  assert.equal(calls.find(call => call.kind === "IMAGE_REVIEW")!.input.plan, undefined);
+  assert.equal(count("PLAN"), 1);
+  assert.equal(count("ART_DIRECTION"), 1);
+});
+
+test("Ozon rejects zero outputs and unsupported exact ratios before dispatch", async () => {
+  respond = ozonSuccess;
+  const projectId = await ozonProject();
+  await assert.rejects(startOzon(projectId, { heroCount: 0, detailCount: 0 }));
+  await assert.rejects(runtime.runWithProviderCredentials(credentials, () => service.createV4DetailRun(projectId, { idempotencyKey: randomUUID(), heroCount: 1, detailCount: 0, imageSettings: { size: "1024x1536" } }, credentials)), /精确的 3:4/);
+  assert.equal(calls.length, 0);
+});
+
+test("Ozon reuses the exact cached classified brief and keeps raw title separate from inferred name", async () => {
+  respond = ozonSuccess;
+  const projectId = await ozonProject({ title: "真实原始标题 8 pcs" });
+  const brief = await import("../lib/detail-runs/brief");
+  await runtime.runWithProviderCredentials(credentials, () => brief.prepareBrief(projectId, { initialOnly: true }));
+  const run = await settled((await startOzon(projectId, { heroCount: 1, detailCount: 0 }))!.id, false);
+  assert.equal(run.status, "WAITING_PROMPTS", JSON.stringify(cpOf(run).lastError));
+  assert.equal(count("OZON_BRIEF"), 1);
+  assert.equal(count("OZON_ANALYSIS"), 0);
+  assert.equal(cpOf(run).ozon!.product.title, "真实原始标题 8 pcs");
+  assert.equal(cpOf(run).ozon!.quantity?.value, 8);
+});
+
+test("Ozon filters invalid pixel references and warns about unknown fact IDs without paid repair loops", async () => {
+  const projectId = await ozonProject();
+  respond = async call => {
+    const response = await ozonSuccess(call);
+    if (call.kind !== "PLAN") return response;
+    const body = await response.json();
+    const p = JSON.parse(body.choices[0].message.content);
+    p.sections[0].referenceAssetIds = [
+      ...p.sections[0].referenceAssetIds,
+      ...call.input.ozon.analysis.references.filter((row: any) => ["evidence", "variant"].includes(row.role)).map((row: any) => row.assetId),
+      "foreign-asset",
+    ];
+    p.sections[0].factIds.push("unknown-fact");
+    return completion(p);
+  };
+  let run = await settled((await startOzon(projectId, { heroCount: 1, detailCount: 0 }))!.id, false);
+  assert.equal(run.status, "WAITING_PROMPTS", JSON.stringify(cpOf(run).lastError));
+  assert.equal(cpOf(run).requests!.PLAN.state, "completed");
+  assert.deepEqual(cpOf(run).plan!.sections[0].factIds, ["identity", "material"]);
+  assert.deepEqual(cpOf(run).plan!.sections[0].referenceAssetIds, cpOf(run).ozon!.sourceAssetIds.slice(0, 2));
+  assert.ok(cpOf(run).contentWarnings?.some(warning => warning.includes("事实记录")));
+  assert.equal(count("PLAN"), 1);
+  assert.equal(count("GENERATE"), 0);
+  const schema = calls.find(call => call.kind === "PLAN")!.body.response_format.json_schema.schema.properties.sections.items;
+  assert.equal(schema.properties.evidence, undefined, "The model is not asked to duplicate saved fact sources");
+  await approve(run);
+  run = await settled(run.id, false);
+  assert.equal(run.status, "COMPLETED", JSON.stringify(cpOf(run).lastError));
+  assert.equal(calls.find(call => call.kind === "GENERATE")!.body.getAll("image[]").length, 2);
+  assert.equal(count("PLAN"), 1);
+});
+
+test("Ozon retains wrong-ratio files and warns instead of regenerating or cropping them", async () => {
+  respond = call => call.kind === "GENERATE" ? success(call) : ozonSuccess(call);
+  const projectId = await ozonProject();
+  let run = await settled((await startOzon(projectId, { heroCount: 1, detailCount: 0 }))!.id);
+  assert.equal(run.status, "PARTIAL");
+  assert.equal(cpOf(run).images[0].check?.passed, false);
+  const asset = await db.productAsset.findUniqueOrThrow({ where: { id: cpOf(run).images[0].assetId } });
+  assert.equal((asset.metadata as any).ozon.delivery.ratioValid, false);
+  const dimensions = await sharp(await storage.readStorageFile(asset.filePath)).metadata();
+  assert.deepEqual([dimensions.width, dimensions.height], [32, 48]);
+  run = await resume(projectId, run.id);
+  assert.equal(run.status, "PARTIAL");
+  assert.equal(count("GENERATE"), 1);
+});
+
+test("Ozon content refusals are classified and never automatically resent", async () => {
+  respond = call => call.kind === "GENERATE" ? Promise.resolve(Response.json({ error: { code: "content_policy_violation", message: "content policy blocked" } }, { status: 400 })) : ozonSuccess(call);
+  const projectId = await ozonProject();
+  let run = await settled((await startOzon(projectId, { heroCount: 1, detailCount: 0 }))!.id);
+  assert.equal(cpOf(run).lastError?.code, "CONTENT_MODERATION_REFUSAL");
+  assert.equal(Object.values(cpOf(run).requests!).find(request => request.failureCode === "CONTENT_MODERATION_REFUSAL")?.state, "uncertain");
+  respond = ozonSuccess;
+  run = await resume(projectId, run.id);
+  assert.equal(count("GENERATE"), 1);
+  assert.equal(cpOf(run).images[0].assetId, undefined);
+});
+
+test("Ozon repeat creation copies original files, links content hashes, and preserves old output", async () => {
+  respond = ozonSuccess;
+  const projectId = await ozonProject({ saleQuantity: "2 双" });
+  const first = await settled((await startOzon(projectId, { heroCount: 1, detailCount: 0 }))!.id);
+  const { cloneOzonProject } = await import("../lib/ozon/runtime");
+  const copy = await cloneOzonProject(projectId);
+  assert.notEqual(copy.id, projectId);
+  assert.equal(await db.productAsset.count({ where: { projectId: copy.id, type: "GENERATED" } }), 0);
+  const repeated = await settled((await startOzon(copy.id, { heroCount: 1, detailCount: 0 }))!.id, false);
+  assert.equal(repeated.status, "WAITING_PROMPTS");
+  assert.equal(cpOf(first).ozon!.identityHash, cpOf(repeated).ozon!.identityHash);
+  assert.notEqual(cpOf(first).ozon!.variationId, cpOf(repeated).ozon!.variationId);
+  assert.ok(cpOf(repeated).ozon!.history.some(entry => entry.runId === first.id));
+  assert.ok(cpOf(repeated).ozon!.history.length <= 5);
+  assert.equal(await db.productAsset.count({ where: { projectId, type: "GENERATED" } }), 1);
+  const sources = await db.productAsset.findMany({ where: { projectId: { in: [projectId, copy.id] }, type: "MAIN" } });
+  assert.equal(new Set(sources.map(asset => asset.filePath)).size, 2);
+});
+
+test("Ozon standalone regeneration and edits keep 3:4, reference scope and provenance", async () => {
+  respond = ozonSuccess;
+  const projectId = await ozonProject();
+  const run = await settled((await startOzon(projectId, { heroCount: 1, detailCount: 0 }))!.id);
+  const imageService = await import("../lib/services/generation-service");
+  const sectionId = cpOf(run).images[0].sectionId;
+  const planningCalls = count("PLAN");
+  const result = await runtime.runWithProviderCredentials(credentials, () => imageService.regenerateSectionImage(projectId, sectionId));
+  assert.equal((result.imageAsset.metadata as any).ozon.delivery.ratioValid, true);
+  assert.equal(count("PLAN"), planningCalls);
+  const call = calls.filter(call => call.kind === "GENERATE").at(-1)!;
+  assert.equal(call.body.get("size"), "1152x1536");
+  assert.equal(call.body.getAll("image[]").length, 2);
+  const approvedPrompt = cpOf(run).promptReview!.pages[0].prompt;
+  assert.ok(approvedPrompt.includes("commercial e-commerce sales poster"));
+  assert.equal(call.body.get("prompt"), approvedPrompt);
+  assert.equal(String(call.body.get("prompt")).split("SHARED VISUAL STYLE").length - 1, 1);
+  const edit = await runtime.runWithProviderCredentials(credentials, () => imageService.editSectionImage(projectId, sectionId, { instruction: "Use a different neutral scene" }));
+  assert.equal((edit.imageAsset.metadata as any).ozon.delivery.ratioValid, true);
+  assert.equal(calls.filter(call => call.kind === "GENERATE").at(-1)!.body.getAll("image[]").length, 3);
+  const editedPrompt = String(calls.filter(call => call.kind === "GENERATE").at(-1)!.body.get("prompt"));
+  assert.ok(editedPrompt.includes(approvedPrompt));
+  assert.equal(editedPrompt.split("SHARED VISUAL STYLE").length - 1, 1);
+  assert.ok(editedPrompt.indexOf("Use a different neutral scene") < editedPrompt.indexOf("Exact copy:\n"));
+  assert.equal(editedPrompt.split("Exact copy:\n")[1], approvedPrompt.split("Exact copy:\n")[1]);
+});
+
+test("Ozon batch keeps per-product quantities, profile and default counts while pausing every child for approval", async () => {
+  respond = ozonSuccess;
+  const productIds = [await ozonProject({ saleQuantity: "2 双" }), await ozonProject({ title: "Товар 44 шт." })];
+  const batches = await import("../lib/detail-runs/batch");
+  const batch = await runtime.runWithProviderCredentials(credentials, () => batches.startBatch({ id: randomUUID(), projectIds: productIds, options: { quality: "low" } }, credentials));
+  await until(async () => (await batches.getBatch(batch.id)).status === "WAITING_PROMPTS");
+  const saved = await batches.getBatch(batch.id);
+  assert.equal(saved.contentProfile, "ozon");
+  assert.equal(saved.items.length, 2);
+  assert.equal(count("GENERATE"), 0);
+  const runs = await db.detailRun.findMany({ where: { projectId: { in: productIds } } });
+  assert.equal(runs.length, 2);
+  for (const run of runs) {
+    assert.deepEqual([(run.input as any).heroCount, (run.input as any).detailCount, (run.input as any).language], [5, 0, "ru-RU"]);
+    assert.equal(cpOf(run).ozon!.quantity?.text, run.projectId === productIds[0] ? "2 双" : "44 шт.");
+  }
+  const generic = await project();
+  await assert.rejects(runtime.runWithProviderCredentials(credentials, () => batches.startBatch({ id: randomUUID(), projectIds: [generic, productIds[0]], options: {} }, credentials)), /单独创建批次/);
+});
+
+test("Ozon ZIP groups only generated catalog and rich-content files and retains a provenance manifest", async () => {
+  respond = ozonSuccess;
+  const projectId = await ozonProject();
+  const run = await settled((await startOzon(projectId, { heroCount: 1, detailCount: 1 }))!.id);
+  assert.equal(run.status, "COMPLETED");
+  const { buildImageArchive } = await import("../lib/services/export-service");
+  const zip = await buildImageArchive(projectId);
+  assert.ok(zip.includes(Buffer.from("00-商品卡图片/")));
+  assert.ok(zip.includes(Buffer.from("01-富文本详情图/")));
+  assert.ok(zip.includes(Buffer.from("export-manifest.json")));
+  assert.equal(zip.includes(Buffer.from("44-pcs-source")), false);
+  const { exportLongImage } = await import("../lib/detail-runs/long-image");
+  await assert.rejects(exportLongImage(projectId), /独立交付/);
+});
+
+async function seedOzonPlanCounts(heroes: number, details: number, returnedDetails: number, invalidFact = false, product: Record<string, string> = {}) {
+  const projectId = await ozonProject(product);
+  const { freezeOzonContext } = await import("../lib/ozon/runtime");
+  const { validateOzonAnalysis } = await import("../lib/ozon/contract");
+  const project = await db.project.findUniqueOrThrow({ where: { id: projectId }, include: { assets: { orderBy: { sortOrder: "asc" } } } });
+  const context = await freezeOzonContext(project);
+  context.analysis = validateOzonAnalysis(ozonAnalysis(context.sourceAssetIds), context);
+  const draft = { ...plan(heroes, returnedDetails), contentCoverage: [], sections: plan(heroes, returnedDetails).sections.map((section, index) => ({ ...section, copy: `Saved description ${index}`, evidence: [context.anchorAssetId], factIds: ["identity", ...(invalidFact && index === 0 ? ["nonexistent_fact"] : [])], referenceAssetIds: context.sourceAssetIds.slice(0, 2), variantOverview: false })) };
+  const checkpoint: V4Checkpoint = { workflowVersion: 4, stage: "PLAN", plan: draft, ozon: context, images: [], imageReviews: {}, answers: [], attempts: {}, timings: {}, requests: { PLAN: { state: "completed", requestId: "saved-paid-planning-request" } }, promptReview: { revision: 0, pages: [] }, lastError: { stage: "PLAN", code: "WORKFLOW_FAILED", message: `DETAIL 数量必须为 ${details}`, retryable: false } };
+  const run = await db.detailRun.create({ data: { projectId, idempotencyKey: randomUUID(), status: "FAILED", stage: "PLAN", error: `DETAIL 数量必须为 ${details}`, checkpoint: JSON.parse(JSON.stringify(checkpoint)), input: { workflowVersion: 4, contentProfile: "ozon", mode: "create", heroCount: heroes, detailCount: details, language: "ru-RU", quality: "low", planningModelId: "gpt-6-luna", analysisModelId: "gpt-6-luna", heroModelId: "gpt-image-2.5-flare", imageModelId: "gpt-image-2.5-flare", ozon: JSON.parse(JSON.stringify(context)) } } });
+  return { projectId, runId: run.id, checkpoint };
+}
+
+for (const ruleVersion of [2, 3, 4]) test(`Ozon rule ${ruleVersion} saved prompts resume unchanged without recompiling layout or repeating model planning`, async () => {
+  respond = ozonSuccess;
+  const heroCount = ruleVersion === 4 ? 0 : 1, detailCount = heroCount ? 0 : 1;
+  const fixture = await seedOzonPlanCounts(heroCount, detailCount, detailCount);
+  const checkpoint = fixture.checkpoint;
+  checkpoint.ozon!.version = ruleVersion;
+  const legacyPrompt = heroCount ? "Legacy saved product scene.\nExact copy:\nСтарый заголовок" : "Legacy detail photograph.\nExact copy:\nПраздничная деталь\nЗелёные веточки и красные шарики";
+  const section = await db.pageSection.create({ data: { projectId: fixture.projectId, sectionKey: "v4-0", order: 0, type: heroCount ? "HERO" : "CUSTOM", title: "Legacy image", goal: "Original offer", copy: "Saved candidate description", visualPrompt: legacyPrompt } });
+  checkpoint.artDirection = art(plan(heroCount, detailCount));
+  checkpoint.promptReview = { revision: 4, pages: [{ sectionId: section.id, title: section.title, kind: heroCount ? "HERO" : "DETAIL", prompt: legacyPrompt }] };
+  checkpoint.requests!.ART_DIRECTION = { state: "completed", requestId: "legacy-completed-storyboard" };
+  checkpoint.lastError = undefined;
+  await saveCheckpoint(fixture.runId, checkpoint);
+  const stored = await db.detailRun.findUniqueOrThrow({ where: { id: fixture.runId } });
+  await db.detailRun.update({ where: { id: fixture.runId }, data: { input: JSON.parse(JSON.stringify({ ...(stored.input as object), ozon: checkpoint.ozon })) } });
+  await service.controlV4DetailRun(fixture.projectId, fixture.runId, "resume", {}, credentials);
+  let run = await settled(fixture.runId, false);
+  assert.equal(run.status, "WAITING_PROMPTS", JSON.stringify(cpOf(run).lastError));
+  assert.equal(cpOf(run).promptReview!.pages[0].prompt, legacyPrompt);
+  assert.equal(count("PLAN"), 0);
+  assert.equal(count("ART_DIRECTION"), 0);
+  assert.equal(count("GENERATE"), 0);
+  await approve(run);
+  run = await settled(fixture.runId, false);
+  assert.equal(run.status, "COMPLETED", JSON.stringify(cpOf(run).lastError));
+  assert.equal(calls.find(call => call.kind === "GENERATE")!.body.get("prompt"), legacyPrompt);
+  assert.equal(cpOf(run).ozon!.version, ruleVersion);
+  assert.equal(count("PLAN"), 0);
+  assert.equal(count("ART_DIRECTION"), 0);
+  if (ruleVersion === 4) {
+    const { cloneOzonProject } = await import("../lib/ozon/runtime");
+    const copy = await cloneOzonProject(fixture.projectId);
+    const repeated = await settled((await startOzon(copy.id, { heroCount: 1, detailCount: 0 }))!.id, false);
+    assert.equal(repeated.status, "WAITING_PROMPTS", JSON.stringify(cpOf(repeated).lastError));
+    assert.equal(cpOf(repeated).ozon!.version, 5);
+    assert.ok(cpOf(repeated).promptReview!.pages[0].prompt.includes("commercial e-commerce sales poster"));
+    assert.equal((await db.pageSection.findUniqueOrThrow({ where: { id: section.id } })).visualPrompt, legacyPrompt);
+    assert.equal(count("GENERATE"), 1, "Repeat creation waits for approval and retains the original generated image");
+  }
+});
+
+for (const heroes of [6, 8]) test(`Ozon saved ${heroes}+7 plan resumes as ${heroes}+6 without repeating paid planning`, async () => {
+  respond = ozonSuccess;
+  const fixture = await seedOzonPlanCounts(heroes, 6, 7);
+  const before = await db.detailRun.findUniqueOrThrow({ where: { id: fixture.runId } });
+  const displayed = await service.getV4DetailRun(fixture.projectId, fixture.runId);
+  assert.match(displayed!.error!, /要求 6 张，规划实际返回 7 张/);
+  assert.deepEqual((await db.detailRun.findUniqueOrThrow({ where: { id: fixture.runId } })).checkpoint, before.checkpoint);
+  await runtime.runWithProviderCredentials(credentials, () => service.controlV4DetailRun(fixture.projectId, fixture.runId, "resume", {}, credentials));
+  const waiting = await settled(fixture.runId, false);
+  assert.equal(waiting.status, "WAITING_PROMPTS", JSON.stringify(cpOf(waiting).lastError));
+  assert.equal(cpOf(waiting).promptReview!.pages.length, heroes + 6);
+  assert.equal(cpOf(waiting).planCountRepair!.originalSections.length, heroes + 7);
+  assert.ok(cpOf(waiting).plan!.sections.at(-1)!.copy.includes(`Saved description ${heroes + 6}`));
+  assert.ok(cpOf(waiting).promptReview!.pages.at(-1)!.prompt.includes(`Saved description ${heroes + 6}`));
+  assert.equal(count("PLAN"), 0);
+  assert.equal(count("OZON_ANALYSIS"), 0);
+  assert.equal(count("ART_DIRECTION"), 1);
+  assert.equal(count("GENERATE"), 0);
+  await service.controlV4DetailRun(fixture.projectId, fixture.runId, "cancel", {}, credentials);
+  await service.controlV4DetailRun(fixture.projectId, fixture.runId, "resume", {}, credentials);
+  assert.equal((await settled(fixture.runId, false)).status, "WAITING_PROMPTS");
+  assert.equal(count("PLAN"), 0);
+  assert.equal(count("ART_DIRECTION"), 1);
+});
+
+test("Ozon missing planned images require explicit replan consent and preserve classified inputs", async () => {
+  respond = ozonSuccess;
+  const fixture = await seedOzonPlanCounts(6, 6, 5);
+  await runtime.runWithProviderCredentials(credentials, () => service.controlV4DetailRun(fixture.projectId, fixture.runId, "resume", {}, credentials));
+  let run = await settled(fixture.runId, false);
+  assert.equal(cpOf(run).lastError?.code, "PLAN_COUNT_INVALID");
+  assert.match(cpOf(run).lastError!.message, /实际返回 5 张/);
+  assert.equal(count("PLAN"), 0);
+  await assert.rejects(service.controlV4DetailRun(fixture.projectId, fixture.runId, "resume", { recoverImagesOnly: true, retryPlan: true }, credentials), /不能同时授权/);
+  const preserved = (await db.detailRun.findUniqueOrThrow({ where: { id: fixture.runId } })).checkpoint;
+  await assert.rejects(service.controlV4DetailRun(fixture.projectId, fixture.runId, "resume", { retryPlan: true }, {}), { code: "PROVIDER_CREDENTIALS_MISSING" });
+  assert.deepEqual((await db.detailRun.findUniqueOrThrow({ where: { id: fixture.runId } })).checkpoint, preserved);
+  await runtime.runWithProviderCredentials(credentials, () => service.controlV4DetailRun(fixture.projectId, fixture.runId, "resume", { retryPlan: true }, credentials));
+  run = await settled(fixture.runId, false);
+  assert.equal(run.status, "WAITING_PROMPTS", JSON.stringify(cpOf(run).lastError));
+  assert.equal(cpOf(run).planDraft!.sections.length, 11);
+  assert.equal(cpOf(run).ozon!.variationId, fixture.checkpoint.ozon!.variationId);
+  assert.equal(count("OZON_ANALYSIS"), 0);
+  assert.equal(count("PLAN"), 1);
+  assert.equal(count("GENERATE"), 0);
+});
+
+for (const returnedDetails of [6, 7]) test(`Ozon saved reference warnings with ${returnedDetails} details resume without paid replanning`, async () => {
+  respond = ozonSuccess;
+  const fixture = await seedOzonPlanCounts(6, 6, returnedDetails, true);
+  fixture.checkpoint.lastError = { stage: "PLAN", code: "OZON_PLAN_INVALID", message: "Ozon 规划引用了不存在的商品事实编号，尚未生图。", retryable: false };
+  await saveCheckpoint(fixture.runId, fixture.checkpoint);
+  const displayed = await service.getV4DetailRun(fixture.projectId, fixture.runId);
+  assert.equal((displayed!.checkpoint as unknown as V4Checkpoint).lastError?.code, returnedDetails === 6 ? "PLAN_REFERENCES_RECOVERABLE" : "PLAN_COUNT_INVALID");
+  await runtime.runWithProviderCredentials(credentials, () => service.controlV4DetailRun(fixture.projectId, fixture.runId, "resume", {}, credentials));
+  const run = await settled(fixture.runId, false);
+  assert.equal(run.status, "WAITING_PROMPTS", JSON.stringify(cpOf(run).lastError));
+  assert.deepEqual(cpOf(run).plan!.sections[0].factIds, ["identity"]);
+  assert.ok(cpOf(run).contentWarnings?.some(warning => warning.includes("事实记录")));
+  assert.equal(count("PLAN"), 0);
+  assert.equal(count("OZON_ANALYSIS"), 0);
+  assert.equal(count("ART_DIRECTION"), 1);
+  assert.equal(count("GENERATE"), 0);
+});
+
+test("Ozon saved valid facts recover missing duplicate sources without changing copy or approved prompts", async () => {
+  respond = ozonSuccess;
+  const fixture = await seedOzonPlanCounts(1, 1, 1, false, { saleQuantity: "2 双" });
+  for (const section of fixture.checkpoint.plan!.sections) section.factIds = ["identity", "material", "sale_quantity"];
+  fixture.checkpoint.lastError = { stage: "PLAN", code: "OZON_PLAN_INVALID", message: "Ozon 规划的事实与来源不一致，未发起生图。", retryable: false };
+  await saveCheckpoint(fixture.runId, fixture.checkpoint);
+  const before = (await db.detailRun.findUniqueOrThrow({ where: { id: fixture.runId } })).checkpoint;
+  const displayed = await service.getV4DetailRun(fixture.projectId, fixture.runId);
+  assert.equal((displayed!.checkpoint as unknown as V4Checkpoint).lastError?.code, "PLAN_REFERENCES_RECOVERABLE");
+  assert.match(displayed!.error!, /无需重新规划/);
+  assert.deepEqual((await db.detailRun.findUniqueOrThrow({ where: { id: fixture.runId } })).checkpoint, before);
+  await runtime.runWithProviderCredentials(credentials, () => service.controlV4DetailRun(fixture.projectId, fixture.runId, "resume", {}, credentials));
+  let run = await settled(fixture.runId, false);
+  assert.equal(run.status, "WAITING_PROMPTS", JSON.stringify(cpOf(run).lastError));
+  for (const [index, section] of cpOf(run).plan!.sections.entries()) {
+    assert.equal(section.copy, fixture.checkpoint.plan!.sections[index].copy);
+    assert.deepEqual(section.evidence, [fixture.checkpoint.ozon!.anchorAssetId, fixture.checkpoint.ozon!.sourceAssetIds[2], "input:saleQuantity"]);
+  }
+  assert.equal(cpOf(run).lastError, undefined);
+  assert.deepEqual(cpOf(run).contentWarnings, []);
+  const edited = cpOf(run).promptReview!.pages.map(page => `${page.prompt}\nSaved composition for this image`);
+  await service.controlV4DetailRun(fixture.projectId, fixture.runId, "save-prompts", { revision: cpOf(run).promptReview!.revision, pages: cpOf(run).promptReview!.pages.map((page, index) => ({ sectionId: page.sectionId, prompt: edited[index] })) }, credentials);
+  await service.controlV4DetailRun(fixture.projectId, fixture.runId, "cancel", {}, credentials);
+  await service.controlV4DetailRun(fixture.projectId, fixture.runId, "resume", {}, credentials);
+  run = await settled(fixture.runId, false);
+  assert.deepEqual(cpOf(run).promptReview!.pages.map(page => page.prompt), edited);
+  assert.equal(count("ART_DIRECTION"), 1);
+  assert.equal(count("PLAN"), 0);
+  assert.equal(count("OZON_ANALYSIS"), 0);
+  assert.equal(count("GENERATE"), 0);
+  await approve(run);
+  run = await settled(fixture.runId, false);
+  assert.equal(run.status, "COMPLETED", JSON.stringify(cpOf(run).lastError));
+  for (const call of calls.filter(call => call.kind === "GENERATE")) {
+    assert.equal(call.body.get("prompt"), edited[call.index!]);
+    assert.equal(call.body.getAll("image[]").length, 2, "The parameter evidence remains information-only");
+  }
+  const sections = await db.pageSection.findMany({ where: { projectId: fixture.projectId }, orderBy: { order: "asc" } });
+  for (const section of sections) assert.deepEqual((section.editableData as any).ozon.facts.map((fact: any) => fact.sourceId), [fixture.checkpoint.ozon!.anchorAssetId, fixture.checkpoint.ozon!.sourceAssetIds[2], "input:saleQuantity"]);
 });

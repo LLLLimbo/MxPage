@@ -2,7 +2,7 @@ import { z } from "zod";
 
 export type PromptReview = {
   revision: number;
-  pages: Array<{ sectionId: string; title: string; kind: "HERO" | "DETAIL"; prompt: string }>;
+  pages: Array<{ sectionId: string; title: string; kind: "HERO" | "DETAIL"; prompt: string; imageRole?: "catalog_main" | "catalog_aux" | "rich_detail" }>;
   approvedAt?: string;
   confirmationId?: string;
 };

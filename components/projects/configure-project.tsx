@@ -1,4 +1,8 @@
 "use client";
+import { OzonProductFields } from "@/components/ozon/product-fields";
+import { useWorkspaceNavigation } from "@/components/layout/workspace-navigation";
+import { OzonReferenceEditor } from "@/components/ozon/reference-editor";
+import { readOzonProduct, type OzonAnalysis, type OzonReference } from "@/lib/ozon/contract";
 import { createClientId } from "@/lib/utils/client-id";
 import { heroCountOptions, detailCountOptions, hasOutputImages, OUTPUT_COUNT_ERROR } from "@/lib/utils/image-counts";
 import Link from "next/link";
@@ -19,14 +23,17 @@ import { StyleReferencePicker } from "./style-reference-picker";
 import { useImageCapabilities, ImageCapabilitySummary, ImageQualitySelect, ImageOptionSelect } from "@/components/providers/image-capability-controls";
 import { commonImageOptions } from "@/lib/ai/image-capabilities";
 
-type Brief = { name: string; description: string; visualDirection: string; recommendedVisualDirection?: string; category?: keyof typeof categoryProfiles; uncertainties: string[]; recognition?: { modelId: string; imageCount: number; detail: "high"; analyzedAt: string; reviewed?: boolean; detailViewCount?: number; corrections?: string[] } };
+type Brief = { name: string; description: string; visualDirection: string; recommendedVisualDirection?: string; category?: keyof typeof categoryProfiles; uncertainties: string[]; ozonAnalysis?: OzonAnalysis; recognition?: { modelId: string; imageCount: number; detail: "high"; analyzedAt: string; reviewed?: boolean; detailViewCount?: number; corrections?: string[] } };
 type Project = { id: string; name: string; description: string | null; platform: string; modelSnapshot: Record<string, any> | null; assets: { id: string; url: string; type: string; metadata?: unknown; fileName?: string }[] };
 import { ApiRequestError, readApiResponse as data, requestErrorMessage } from "@/lib/utils/request-error";
 export function ConfigureProject({ project }: { project: Project }) {
-  const imageModels = useImageCapabilities();
+  const isOzon = project.platform === "ozon";
+  useWorkspaceNavigation(isOzon ? "/ozon" : null);
   const router = useRouter();
   const snapshot = project.modelSnapshot || {};
   const saved = snapshot.previewConfig || {};
+  const [ozonProduct, setOzonProduct] = useState(() => readOzonProduct(snapshot));
+  const [ozonReferences, setOzonReferences] = useState<OzonReference[]>(snapshot.ozonReferences?.length ? snapshot.ozonReferences : snapshot.creationBrief?.ozonAnalysis?.references || []);
   const confirmed = snapshot.creationConfigured;
   const [brief, setBrief] = useState<Brief | null>(snapshot.creationBrief || null);
   const [name, setName] = useState(confirmed ? project.name : snapshot.creationBrief?.name || project.name);
@@ -37,9 +44,10 @@ export function ConfigureProject({ project }: { project: Project }) {
   const uploadedFiles = useRef(new Set<File>());
   const productAssets = project.assets.filter(a => !isStyleReference(a));
   const [platform, setPlatform] = useState(project.platform);
-  const [language, setLanguage] = useState(saved.contentLanguage || "zh-CN");
-  const [heroCount, setHeroCount] = useState(saved.heroImageCount ?? 4);
-  const [detailCount, setDetailCount] = useState(saved.detailSectionCount ?? 6);
+  const [language, setLanguage] = useState(saved.contentLanguage || (isOzon ? "ru-RU" : "zh-CN"));
+  const [heroCount, setHeroCount] = useState(saved.heroImageCount ?? (isOzon ? 5 : 4));
+  const [detailCount, setDetailCount] = useState(saved.detailSectionCount ?? (isOzon ? 0 : 6));
+  const imageModels = useImageCapabilities([...(heroCount ? ["hero"] : []), ...(detailCount ? ["detail"] : [])].join(","));
   const [quality, setQuality] = useState(saved.quality || "auto");
   const savedSize = saved.imageSettings?.size || "auto";
   const presetSizes = ["auto", "1024x1024", "1024x1536", "1536x1024"];
@@ -68,8 +76,10 @@ export function ConfigureProject({ project }: { project: Project }) {
     analysisPending.current = true;
     setAnalyzing(true); setAnalysisSeconds(0); setError(""); setErrorCode("");
     try {
+      if (isOzon) await data(await fetch(`/api/projects/${project.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ozonProduct }) }));
       const result: Brief = await data(await fetch(`/api/projects/${project.id}/brief`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ force, resume, retryUncertain }) }));
       setBrief(result);
+      if (isOzon && result.ozonAnalysis && !dirty.current.has("references")) setOzonReferences(result.ozonAnalysis.references);
       if (!confirmed && !dirty.current.has("name")) setName(result.name);
       if (!confirmed && !dirty.current.has("description")) setDescription(result.description);
     } catch (e) { setError(requestErrorMessage(e)); setErrorCode(e instanceof ApiRequestError ? e.code : ""); setUncertain(e instanceof ApiRequestError ? e.code === "BRIEF_UNCERTAIN" : true); }
@@ -97,9 +107,9 @@ export function ConfigureProject({ project }: { project: Project }) {
         setStyleAssets(previous => [...previous, asset]);
         setStyleFiles(previous => previous.filter(f => f !== file));
       }
-      const resolvedSize = imageSize === "custom" ? `${customWidth}x${customHeight}` : imageSize;
+      const resolvedSize = isOzon ? "auto" : imageSize === "custom" ? `${customWidth}x${customHeight}` : imageSize;
       const imageSettings = { size: resolvedSize, background: imageBackground, outputFormat: imageOutputFormat, outputCompression: imageCompression, moderation: imageModeration };
-      await data(await fetch(`/api/projects/${project.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, description, platform, modelSnapshot: { creationBrief: brief, creationConfigured: true, commerceCategory: category, creativePreferences: { version: 2, userDirection: direction }, previewConfig: { ...saved, heroImageCount: heroCount, detailSectionCount: detailCount, contentLanguage: language, imageAspectRatio: "3:4", quality, imageSettings } } }) }));
+      await data(await fetch(`/api/projects/${project.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, description, platform, ...(isOzon ? { ozonProduct, ozonReferences } : {}), modelSnapshot: { creationBrief: brief, creationConfigured: true, commerceCategory: category, creativePreferences: { version: 2, userDirection: direction }, previewConfig: { ...saved, heroImageCount: heroCount, detailSectionCount: detailCount, contentLanguage: language, imageAspectRatio: "3:4", quality, imageSettings } } }) }));
       key.current ||= createClientId();
       await data(await fetch(`/api/projects/${project.id}/detail-runs`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ idempotencyKey: key.current, language, heroCount, detailCount, quality, imageSettings }) }));
       router.push(`/projects/${project.id}/editor`);
@@ -114,11 +124,12 @@ export function ConfigureProject({ project }: { project: Project }) {
   }
   const recommended = categoryProfiles[category === "auto" ? brief?.category || "everyday" : category]?.art || brief?.recommendedVisualDirection;
   return <div className="mx-auto max-w-5xl space-y-8 py-6">
-    <Link href="/" className="text-sm text-muted-foreground hover:text-foreground">← 返回首页</Link>
+    <Link href={isOzon ? "/ozon" : "/"} className="text-sm text-muted-foreground hover:text-foreground">← {isOzon ? "Ozon 一键详情页" : "返回首页"}</Link>
     <header><p className="text-sm text-muted-foreground">商品已就位</p><h1 className="mt-2 text-3xl font-semibold">确认创作方向</h1><p className="mt-3 text-muted-foreground">Agent 先理解商品，你来决定最终呈现。</p></header>
     <div className="grid gap-8 md:grid-cols-[minmax(0,1fr)_minmax(0,1.5fr)]">
       <aside className="space-y-4"><div className="aspect-square overflow-hidden rounded-3xl border bg-card"><img src={productAssets.find(a => a.type === "MAIN")?.url || productAssets[0]?.url} alt="商品主图" className="h-full w-full object-contain"/></div><div className="flex flex-wrap gap-2">{productAssets.filter(a => ["MAIN", "ANGLE", "DETAIL", "REFERENCE"].includes(a.type)).map(a => <img key={a.id} src={a.url} alt="商品素材" className="h-16 w-16 rounded-xl border bg-card object-contain"/>)}</div><p className="text-xs leading-6 text-muted-foreground">分析建议来自图片识别。文字、规格和细节仍可能误读，请结合原图核实后生成。</p></aside>
       <div className="space-y-6">
+        {isOzon && <fieldset disabled={busy}><OzonReferenceEditor assets={productAssets} value={ozonReferences} onChange={value => { dirty.current.add("references"); setOzonReferences(value); }}/></fieldset>}
         <div role="status" className="rounded-2xl border bg-card p-4 text-sm">
           <div className="flex flex-wrap items-center justify-between gap-3"><div className="flex items-center gap-2 font-medium">{analyzing ? <Loader2 className="h-4 w-4 animate-spin"/> : <Sparkles className="h-4 w-4"/>}{analyzing ? `Agent 正在识别并复核商品… ${analysisSeconds}s` : error ? "暂时无法完成分析" : brief && !brief.recognition ? "历史预填，建议重新识别" : "Agent 已预填，可自由调整"}</div>{brief && !error && <Button variant="outline" size="sm" disabled={analyzing || busy} onClick={() => analyze(true)}><RefreshCw className="mr-2 h-3.5 w-3.5"/>重新识别</Button>}</div>
           {brief?.recognition && <p className="mt-3 break-words text-xs text-muted-foreground">识别模型：{brief.recognition.modelId} · {brief.recognition.imageCount} 张素材 · {brief.recognition.reviewed ? `${brief.recognition.detailViewCount} 个局部视图已复核` : "此结果尚未进行局部复核，建议重新识别"}</p>}
@@ -130,23 +141,23 @@ export function ConfigureProject({ project }: { project: Project }) {
         </div>
         <fieldset disabled={busy} className="space-y-5">
           <div className="space-y-3 rounded-2xl border bg-muted/30 p-4"><label className="block space-y-2 text-sm">商品品类<Select value={category} onValueChange={v => setCategory(v as typeof category)}><option value="auto">由 Agent 识别并推荐</option>{categoryKeys.map(c => <option key={c} value={c}>{categoryProfiles[c].label}</option>)}</Select></label><p className="text-xs leading-6 text-muted-foreground">{category === "auto" ? "根据商品品类规划卖点顺序、场景和版式。上传图用于保持商品一致，成品会重新设计光线、背景与构图。" : categoryProfiles[category].story}</p>{category !== "auto" && <p className="text-xs leading-6 text-muted-foreground">{categoryProfiles[category].art}</p>}</div>
-          <label className="block space-y-2 text-sm">商品名称<Input value={name} maxLength={80} onChange={e => { dirty.current.add("name"); setName(e.target.value); }}/></label>
-          <label className="block space-y-2 text-sm">商品描述与卖点<Textarea value={description} rows={4} maxLength={4000} placeholder="补充准确规格、卖点或目标人群" onChange={e => { dirty.current.add("description"); setDescription(e.target.value); }}/></label>
+          <label className="block space-y-2 text-sm">{isOzon ? "作品名称" : "商品名称"}<Input value={name} maxLength={80} onChange={e => { dirty.current.add("name"); setName(e.target.value); }}/></label>
+          {isOzon ? <OzonProductFields value={ozonProduct} onChange={value => { dirty.current.add("ozonProduct"); setOzonProduct(value); }}/> : <label className="block space-y-2 text-sm">商品描述与卖点<Textarea value={description} rows={4} maxLength={4000} placeholder="补充准确规格、卖点或目标人群" onChange={e => { dirty.current.add("description"); setDescription(e.target.value); }}/></label>}
           {recommended && <div className="rounded-xl bg-muted/40 p-4 text-sm"><p className="font-medium">AI 推荐方向</p><p className="mt-2 leading-6 text-muted-foreground">{recommended}</p><p className="mt-2 text-xs text-muted-foreground">视觉导演会结合案例调整摄影、布景和排版，这不是你的强制要求。</p></div>}
           <label className="block space-y-2 text-sm">自定义视觉要求（可选）<Textarea value={direction} rows={3} maxLength={1200} placeholder="例如：用深蓝与银色，呈现克制的科技感。留空由视觉导演设计。" onChange={e => { dirty.current.add("direction"); setDirection(e.target.value); }}/></label>
-          <StyleReferencePicker files={styleFiles} onChange={setStyleFiles} stored={styleAssets} onRemoveStored={removeStyle} disabled={busy}/>
+          {!isOzon && <StyleReferencePicker files={styleFiles} onChange={setStyleFiles} stored={styleAssets} onRemoveStored={removeStyle} disabled={busy}/>}
           <div className="grid grid-cols-2 gap-4">
-            <label className="space-y-2 text-sm">发布平台<Select value={platform} onValueChange={setPlatform}>{platformOptions.map(p => <option key={p} value={p}>{platformLabels[p]}</option>)}</Select></label>
+            <label className="space-y-2 text-sm">发布平台<Select value={platform} onValueChange={setPlatform}>{(isOzon ? ["ozon"] as const : platformOptions.filter(value => value !== "ozon")).map(p => <option key={p} value={p}>{platformLabels[p]}</option>)}</Select></label>
             <label className="space-y-2 text-sm">图片语言<Select value={language} onValueChange={setLanguage}>{contentLanguageOptions.map(l => <option key={l} value={l}>{contentLanguageLabels[l]}</option>)}</Select></label>
-            <label className="space-y-2 text-sm">头图数量<Select value={heroCount} onValueChange={v => setHeroCount(Number(v))}>{heroCountOptions.map(n => <option key={n}>{n}</option>)}</Select></label>
-            <label className="space-y-2 text-sm">详情图数量<Select value={detailCount} onValueChange={v => setDetailCount(Number(v))}>{detailCountOptions.map(n => <option key={n}>{n}</option>)}</Select></label>
+            <label className="space-y-2 text-sm">{isOzon ? "商品卡图片张数" : "头图数量"}<Select value={heroCount} onValueChange={v => setHeroCount(Number(v))}>{heroCountOptions.map(n => <option key={n}>{n}</option>)}</Select></label>
+            <label className="space-y-2 text-sm">{isOzon ? "富文本详情图张数" : "详情图数量"}<Select value={detailCount} onValueChange={v => setDetailCount(Number(v))}>{detailCountOptions.map(n => <option key={n}>{n}</option>)}</Select></label>
           </div>
           <label className="block space-y-2 text-sm">图像画质<ImageQualitySelect value={quality} onChange={setQuality} models={imageModels}/></label>
-          <div className="grid gap-3 sm:grid-cols-2"><label className="block space-y-2 text-sm">GPT Image 尺寸<ImageOptionSelect value={imageSize} onChange={setImageSize} values={imageModels.reduce<string[]>((values, m) => m.sizes ? values.filter(v => v === "auto" || m.sizes!.includes(v)) : values, ["auto", "1024x1024", "1024x1536", "1536x1024", "custom", ...imageModels.flatMap(m => m.sizes || [])]).filter((v, i, a) => a.indexOf(v) === i)}/></label><label className="block space-y-2 text-sm">背景<ImageOptionSelect value={imageBackground} onChange={setImageBackground} values={commonImageOptions(imageModels, "backgrounds") || ["auto", "opaque", "transparent"]}/></label>{imageSize === "custom" && <><label className="block space-y-2 text-sm">自定义宽度（16 的倍数）<Input type="number" min={16} max={3840} step={16} value={customWidth} onChange={event => setCustomWidth(Number(event.target.value) || 16)} /></label><label className="block space-y-2 text-sm">自定义高度（16 的倍数）<Input type="number" min={16} max={3840} step={16} value={customHeight} onChange={event => setCustomHeight(Number(event.target.value) || 16)} /></label></>}<label className="block space-y-2 text-sm">输出格式<ImageOptionSelect value={imageOutputFormat} onChange={setImageOutputFormat} values={commonImageOptions(imageModels, "formats") || ["png", "jpeg", "webp"]}/></label><label className="block space-y-2 text-sm">输出压缩度（0–100）<Input disabled={imageCompression === 100 && imageModels.some(m => !m.compression)} type="number" min={0} max={100} value={imageCompression} onChange={event => setImageCompression(Math.max(0, Math.min(100, Number(event.target.value) || 0)))} /></label><label className="block space-y-2 text-sm">内容审核<ImageOptionSelect value={imageModeration} onChange={setImageModeration} values={imageModels.some(m => !m.moderation) ? ["auto"] : ["auto", "low"]}/></label></div>
+          <div className="grid gap-3 sm:grid-cols-2">{isOzon ? <p className="text-sm leading-6">输出比例：3:4 竖版（商品卡与详情图）</p> : <label className="block space-y-2 text-sm">GPT Image 尺寸<ImageOptionSelect value={imageSize} onChange={setImageSize} values={imageModels.reduce<string[]>((values, m) => m.sizes ? values.filter(v => v === "auto" || m.sizes!.includes(v)) : values, ["auto", "1024x1024", "1024x1536", "1536x1024", "custom", ...imageModels.flatMap(m => m.sizes || [])]).filter((v, i, a) => a.indexOf(v) === i)}/></label>}<label className="block space-y-2 text-sm">背景<ImageOptionSelect value={imageBackground} onChange={setImageBackground} values={commonImageOptions(imageModels, "backgrounds") || ["auto", "opaque", "transparent"]}/></label>{!isOzon && imageSize === "custom" && <><label className="block space-y-2 text-sm">自定义宽度（16 的倍数）<Input type="number" min={16} max={3840} step={16} value={customWidth} onChange={event => setCustomWidth(Number(event.target.value) || 16)} /></label><label className="block space-y-2 text-sm">自定义高度（16 的倍数）<Input type="number" min={16} max={3840} step={16} value={customHeight} onChange={event => setCustomHeight(Number(event.target.value) || 16)} /></label></>}<label className="block space-y-2 text-sm">输出格式<ImageOptionSelect value={imageOutputFormat} onChange={setImageOutputFormat} values={commonImageOptions(imageModels, "formats") || ["png", "jpeg", "webp"]}/></label><label className="block space-y-2 text-sm">输出压缩度（0–100）<Input disabled={imageCompression === 100 && imageModels.some(m => !m.compression)} type="number" min={0} max={100} value={imageCompression} onChange={event => setImageCompression(Math.max(0, Math.min(100, Number(event.target.value) || 0)))} /></label><label className="block space-y-2 text-sm">内容审核<ImageOptionSelect value={imageModeration} onChange={setImageModeration} values={imageModels.some(m => !m.moderation) ? ["auto"] : ["auto", "low"]}/></label></div>
           <ImageCapabilitySummary models={imageModels}/>
           {!hasOutputImages(heroCount, detailCount) && <p role="alert" className="text-sm text-destructive">{OUTPUT_COUNT_ERROR}</p>}
           <Button className="h-12 w-full" disabled={analyzing || !brief || name.trim().length < 2 || busy || !hasOutputImages(heroCount, detailCount)} onClick={generate}>{busy && <Loader2 className="mr-2 h-4 w-4 animate-spin"/>}{busy ? "正在启动…" : `确认并生成 ${heroCount + detailCount} 张图片`}</Button>
-          <p className="text-xs leading-6 text-muted-foreground">头图 1:1，详情图 3:4。主图或详情图均可选 0，只生成另一类图片；两项不能同时为 0。按画面任务设计图文节奏；质检存疑图片会保留并标记，可手动修改。画质影响耗时和费用。</p>
+          <p className="text-xs leading-6 text-muted-foreground">{isOzon ? "商品卡首张为主图，其余为附图；富文本详情图单独交付。两类均为3:4，可单独生成。确认提示词后才开始生图；结果需要逐张看图验收。" : "头图 1:1，详情图 3:4。主图或详情图均可选 0，只生成另一类图片；两项不能同时为 0。按画面任务设计图文节奏；质检存疑图片会保留并标记，可手动修改。画质影响耗时和费用。"}</p>
         </fieldset>
       </div>
     </div>
